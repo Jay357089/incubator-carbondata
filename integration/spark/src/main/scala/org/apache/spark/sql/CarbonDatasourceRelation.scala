@@ -73,7 +73,7 @@ class CarbonSource extends RelationProvider
   override def createRelation(
       sqlContext: SQLContext,
       mode: SaveMode,
-      parameters: Map[String, String],
+      paras: Map[String, String],
       data: SchemaRDD): BaseRelation = {
 
     // To avoid derby problem, dataframe need to be writen and read using CarbonContext
@@ -82,6 +82,7 @@ class CarbonSource extends RelationProvider
 
     // User should not specify path since only one store is supported in carbon currently,
     // after we support multi-store, we can remove this limitation
+    val parameters = paras - "path"
     require(!parameters.contains("path"), "'path' should not be specified, " +
         "the path to store carbon file is the 'storePath' specified when creating CarbonContext")
 
