@@ -18,9 +18,7 @@
  */
 package org.apache.carbondata.core.util;
 
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.ObjectInputStream;
+import java.io.*;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.BitSet;
@@ -29,8 +27,10 @@ import java.util.List;
 
 import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
+import org.apache.carbondata.core.carbon.CarbonTableIdentifier;
 import org.apache.carbondata.core.carbon.datastore.block.BlockInfo;
 import org.apache.carbondata.core.carbon.datastore.block.TableBlockInfo;
+import org.apache.carbondata.core.carbon.metadata.CarbonMetadata;
 import org.apache.carbondata.core.carbon.metadata.blocklet.BlockletInfo;
 import org.apache.carbondata.core.carbon.metadata.blocklet.DataFileFooter;
 import org.apache.carbondata.core.carbon.metadata.blocklet.SegmentInfo;
@@ -44,9 +44,13 @@ import org.apache.carbondata.core.carbon.metadata.blocklet.index.BlockletMinMaxI
 import org.apache.carbondata.core.carbon.metadata.blocklet.sort.SortState;
 import org.apache.carbondata.core.carbon.metadata.datatype.DataType;
 import org.apache.carbondata.core.carbon.metadata.encoder.Encoding;
+import org.apache.carbondata.core.carbon.metadata.schema.table.CarbonTable;
 import org.apache.carbondata.core.carbon.metadata.schema.table.column.ColumnSchema;
+import org.apache.carbondata.core.carbon.path.CarbonStorePath;
+import org.apache.carbondata.core.carbon.path.CarbonTablePath;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.datastorage.store.FileHolder;
+import org.apache.carbondata.core.datastorage.store.filesystem.CarbonFile;
 import org.apache.carbondata.core.datastorage.store.impl.FileFactory;
 import org.apache.carbondata.core.metadata.ValueEncoderMeta;
 import org.apache.carbondata.core.reader.CarbonFooterReader;
@@ -496,5 +500,42 @@ public class DataFileFooterConverter {
       CarbonUtil.closeStreams(objStream);
     }
     return meta;
+  }
+
+  public int[] getColumnCardinality(String carbonStorePath, String dbName,
+      String tableName, String segmentId) throws FileNotFoundException {
+
+    CarbonTable carbonTable = CarbonMetadata.getInstance().getCarbonTable(dbName +
+            CarbonCommonConstants.UNDERSCORE + tableName);
+    CarbonTableIdentifier carbonTableIdentifier = carbonTable.getCarbonTableIdentifier();
+    CarbonTablePath carbonTablePath =
+        CarbonStorePath.getCarbonTablePath(carbonStorePath, carbonTableIdentifier);
+    String segmentPath = carbonTablePath.getPartitionDir("0") + File.separator +
+        "Segment_" + segmentId;
+    FileFactory.FileType fileType = FileFactory.getFileType(segmentPath);
+    CarbonFile segmentFolder = FileFactory.getCarbonFile(segmentPath, fileType);
+    String indexFilePath = null;
+    for(CarbonFile file:segmentFolder.listFiles()) {
+      if (file.getAbsolutePath().endsWith(".carbonindex")) {
+        indexFilePath = file.getAbsolutePath();
+        break;
+      }
+    }
+    if (indexFilePath == null) {
+      throw new FileNotFoundException("carbonindex file is not found");
+    }
+    int[] colCardinality = null;
+    try {
+      CarbonIndexFileReader indexReader = new CarbonIndexFileReader();
+      // open the reader
+      indexReader.openThriftReader(indexFilePath);
+      // get the index header
+      org.apache.carbondata.format.IndexHeader readIndexHeader = indexReader.readIndexHeader();
+      SegmentInfo segmentInfo = getSegmentInfo(readIndexHeader.getSegment_info());
+      colCardinality = segmentInfo.getColumnCardinality();
+    } catch (IOException ex) {
+      LOGGER.error(ex);
+    }
+    return colCardinality;
   }
 }

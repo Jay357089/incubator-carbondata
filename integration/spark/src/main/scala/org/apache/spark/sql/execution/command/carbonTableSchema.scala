@@ -25,14 +25,15 @@ import java.util.UUID
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{ArrayBuffer, Map}
 import scala.language.implicitConversions
-import scala.util.Random
 
 import org.apache.spark.SparkEnv
 import org.apache.spark.sql._
+import org.apache.spark.sql.catalyst.analysis.UnresolvedAlias
 import org.apache.spark.sql.catalyst.TableIdentifier
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Cast, Literal}
+import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.execution.{RunnableCommand, SparkPlan}
-import org.apache.spark.sql.hive.{CarbonHiveMetadataUtil, HiveContext}
+import org.apache.spark.sql.hive.{CarbonMetastoreCatalog, DistributionUtil}
 import org.apache.spark.sql.types.TimestampType
 import org.apache.spark.util.FileUtils
 import org.codehaus.jackson.map.ObjectMapper
@@ -45,25 +46,23 @@ import org.apache.carbondata.core.carbon.metadata.datatype.DataType
 import org.apache.carbondata.core.carbon.metadata.encoder.Encoding
 import org.apache.carbondata.core.carbon.metadata.schema.{SchemaEvolution, SchemaEvolutionEntry}
 import org.apache.carbondata.core.carbon.metadata.schema.table.{CarbonTable, TableInfo, TableSchema}
-import org.apache.carbondata.core.carbon.metadata.schema.table.column.{CarbonDimension,
-ColumnSchema}
+import org.apache.carbondata.core.carbon.metadata.schema.table.column.{CarbonDimension, ColumnSchema}
 import org.apache.carbondata.core.carbon.path.CarbonStorePath
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.datastorage.store.impl.FileFactory
 import org.apache.carbondata.core.load.LoadMetadataDetails
-import org.apache.carbondata.core.util.{CarbonProperties, CarbonUtil}
+import org.apache.carbondata.core.util.{CarbonProperties, CarbonUtil, DataFileFooterConverter}
 import org.apache.carbondata.integration.spark.merger.CompactionType
 import org.apache.carbondata.lcm.locks.{CarbonLockFactory, LockUsage}
 import org.apache.carbondata.lcm.status.SegmentStatusManager
 import org.apache.carbondata.processing.constants.TableOptionConstant
 import org.apache.carbondata.processing.etl.DataLoadingException
 import org.apache.carbondata.processing.model.CarbonLoadModel
-import org.apache.carbondata.spark.CarbonSparkFactory
+import org.apache.carbondata.spark.{CarbonDataFrameWriter, CarbonSparkFactory, DataLoadResultImpl}
 import org.apache.carbondata.spark.exception.MalformedCarbonCommandException
 import org.apache.carbondata.spark.load._
-import org.apache.carbondata.spark.rdd.CarbonDataRDDFactory
-import org.apache.carbondata.spark.util.{CarbonScalaUtil, DataTypeConverterUtil,
-GlobalDictionaryUtil}
+import org.apache.carbondata.spark.rdd.{CarbonAggTableRDD, CarbonDataRDDFactory}
+import org.apache.carbondata.spark.util.{CarbonScalaUtil, DataTypeConverterUtil, GlobalDictionaryUtil}
 
 case class tableModel(
     ifNotExistsSet: Boolean,
@@ -1036,6 +1035,204 @@ private[sql] case class ShowLoads(
     }
   }
 
+}
+
+private[sql] case class CreateCarbonTableAsSelect(
+    databaseName: Option[String],
+    tableName: String,
+    allowExisting: Boolean,
+    createSql: String) extends RunnableCommand {
+
+  val LOGGER = LogServiceFactory.getLogService(this.getClass.getCanonicalName)
+
+  override def run(sqlContext: SQLContext): Seq[Row] = {
+    val dbName = getDB.getDatabaseName(databaseName, sqlContext)
+    val options = Map("dbName" -> dbName,
+      "tableName" -> tableName,
+      "allowExisting" -> allowExisting.toString)
+    // split first to make sure getting the exact SELECT index
+    val queryTokens = createSql.split("\\s+")
+    val selectIndex = queryTokens.indexWhere(_.equalsIgnoreCase("SELECT"))
+    val subQuery = new Array[String](queryTokens.length - selectIndex)
+    Array.copy(queryTokens, selectIndex, subQuery, 0, subQuery.length)
+    // check whether is for creating aggregation table
+    val (factTable, aggFlag) = tableName.splitAt(tableName.indexOf("_"))
+    val factTableExists = CarbonEnv.getInstance(sqlContext).carbonCatalog
+      .tableExists(TableIdentifier(factTable, databaseName))(sqlContext)
+    if (factTableExists &&
+      aggFlag.split("_")(1).equalsIgnoreCase(CarbonCommonConstants.AGG_TABLE_FLAG)) {
+      val factCarbonTable = CarbonMetadata.getInstance.getCarbonTable(dbName +
+      CarbonCommonConstants.UNDERSCORE + factTable)
+      // aggregate table index number.
+      var index = 0
+      if (!factCarbonTable.getAggregateTablesName.isEmpty) {
+        index = factCarbonTable.getAggregateTablesName.size
+      }
+      val aggTableName = tableName + CarbonCommonConstants.UNDERSCORE + index
+      CreateAggTable(dbName, factTable, aggTableName, options, subQuery).run(sqlContext)
+    } else {
+      val subLogicalPlan = sqlContext.parseSql(subQuery.mkString(" "))
+      val dataFrame = DataFrame(sqlContext, subLogicalPlan)
+      new CarbonDataFrameWriter(dataFrame).saveAsCarbonFile(options.toMap)
+    }
+    Seq.empty
+  }
+}
+
+private[sql] case class CreateAggTable(
+    databaseName: String,
+    factTableName: String,
+    aggTableName: String,
+    options: Map[String, String],
+    subQuery: Array[String]) extends RunnableCommand {
+
+  val LOGGER = LogServiceFactory.getLogService(this.getClass.getCanonicalName)
+
+  override def run(sqlContext: SQLContext): Seq[Row] = {
+    LOGGER.info(s"Creating aggregation table: $aggTableName " +
+      s"for factable: $databaseName.$factTableName}")
+    val factTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+      .getCarbonTable(databaseName + "_" + factTableName)
+    val querySql = subQuery.mkString(" ")
+    val queryExecution = sqlContext.sql(querySql).queryExecution
+    val childPlan = queryExecution.analyzed
+    var groupByExp: Seq[String] = Seq()
+    var aggregateExp: Seq[String] = Seq()
+    childPlan.foreach {
+      case Aggregate(groupExp, aggExp, _) =>
+        groupExp.foreach {
+          groupByExp :+= _.asInstanceOf[AttributeReference].name.toLowerCase
+        }
+        aggExp.foreach { exp =>
+          exp match {
+            case AttributeReference(name, _, _, _) =>
+              aggregateExp :+= name.toLowerCase
+            case Alias(child, _) =>
+              aggregateExp :+= child.prettyString
+            case other =>
+          }
+        }
+      case other =>
+    }
+    var addToProject: ArrayBuffer[String] = ArrayBuffer()
+    groupByExp.foreach { groupByCol =>
+      if (!aggregateExp.contains(groupByCol)) {
+        addToProject :+= groupByCol
+      }
+    }
+    // need to add to aggreagete expression
+    aggregateExp ++:= addToProject
+    // create agg table based on subquery schema
+    sqlContext.sql(CarbonMetastoreCatalog.createAggTableSql(
+      queryExecution.analyzed.schema, factTable, databaseName,
+      aggTableName, groupByExp, aggregateExp))
+    // add aggregate table info to fact table's schema
+    // add query Sql on fact table to aggregate table's table properties
+    val catalog = CarbonEnv.getInstance(sqlContext).carbonCatalog
+    catalog.updateAggTableSchema(databaseName, factTableName, aggTableName, querySql)
+    // load into aggregate table for every segment
+    LoadIntoAggTable(databaseName, factTableName, aggTableName).run(sqlContext)
+    catalog.updateFactTableSchema(databaseName, factTableName, aggTableName)
+    Seq.empty
+  }
+}
+
+private[sql] case class LoadIntoAggTable(
+    dataBaseName: String,
+    factTableName: String,
+    aggTableName: String)
+  extends RunnableCommand {
+
+  override def run(sqlContext: SQLContext): Seq[Row] = {
+    val factTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+      .getCarbonTable(dataBaseName + "_" + factTableName)
+    val carbonLoadModel = new CarbonLoadModel
+    // try to follow the load step, but ignore csvInput and surrogateKeyStep
+    val dataLoadSchema = new CarbonDataLoadSchema(factTable)
+    carbonLoadModel.setCarbonDataLoadSchema(dataLoadSchema)
+    carbonLoadModel.setTableName(factTableName)
+    carbonLoadModel.setDatabaseName(dataBaseName)
+    carbonLoadModel.setStorePath(factTable.getStorePath)
+    val kettleHome = CarbonScalaUtil.getKettleHome(sqlContext)
+    carbonLoadModel.setKettleHomePath(kettleHome)
+    carbonLoadModel.setAggTables(Array(aggTableName))
+    // Check if any load need to be deleted before loading new data
+    CarbonDataRDDFactory.deleteLoadsAndUpdateMetadata(carbonLoadModel,
+      factTable, factTable.getStorePath, isForceDeletion = false)
+    if (null == carbonLoadModel.getLoadMetadataDetails) {
+      CarbonDataRDDFactory.readLoadMetadataDetails(carbonLoadModel, factTable.getStorePath)
+    }
+    var segmentLists: List[String] = List()
+    carbonLoadModel.getLoadMetadataDetails.asScala.foreach {
+      segmentLists :+= _.getLoadName
+    }
+    LoadIntoAggTable.loadIntoAggTableBySegment(sqlContext, carbonLoadModel, segmentLists)
+
+    Seq.empty
+  }
+}
+
+object LoadIntoAggTable {
+
+  // API for load into aggregation table.
+  def loadIntoAggTableBySegment(sqlContext: SQLContext,
+    carbonLoadModel: CarbonLoadModel,
+    segmentList: List[String]): Unit = {
+    val factTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+      .getCarbonTable(carbonLoadModel.getDatabaseName + "_" + carbonLoadModel.getTableName)
+    // for every agg table, every segment, do loading
+    carbonLoadModel.getAggTables.foreach { aggTableName =>
+      val aggTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+        .getCarbonTable(carbonLoadModel.getDatabaseName + "_" + aggTableName)
+      carbonLoadModel.setAggTableName(aggTableName)
+      val subQuerySql = aggTable.getQuerySqlOnFactTable
+      val childPlan = sqlContext.parseSql(subQuerySql)
+      segmentList.foreach { segmentId =>
+        // need to get cardinality from fact table
+        val fileFooterConverter: DataFileFooterConverter = new DataFileFooterConverter
+        val factColCardinality = fileFooterConverter.getColumnCardinality(
+          carbonLoadModel.getStorePath, carbonLoadModel.getDatabaseName,
+          carbonLoadModel.getTableName, segmentId)
+        // first to initialize as -1, which means noDict.
+        val aggDimlenth = aggTable.getNumberOfDimensions(aggTableName)
+        val aggColCardinality: Array[Int] = new Array(aggDimlenth)
+        for(i <- 0 until aggDimlenth) {
+          aggColCardinality(i) = -1
+        }
+        var index: Int = -1
+        factTable.getDimensionByTableName(factTable.getFactTableName).asScala.foreach {dim =>
+          index += 1
+          val aggIndex = aggTable.getDimensionByTableName(aggTable.getFactTableName).asScala
+            .map(_.getColName).indexOf(dim.getColName)
+          if(aggIndex != -1) {
+            aggColCardinality(aggIndex) = factColCardinality(index)
+          }
+        }
+        // use DataFrame to load data.
+        val childPlanForSegment = AddSegmentId(Some(segmentId), childPlan)
+        val dataFrame = DataFrame(sqlContext, childPlanForSegment)
+        // start to load into aggtable
+        var numPartitions = DistributionUtil.getNodeList(sqlContext.sparkContext).length
+        numPartitions = Math.max(1, Math.min(numPartitions, dataFrame.rdd.partitions.length))
+        val newDF = dataFrame.coalesce(numPartitions)
+        carbonLoadModel.setFactTimeStamp(CarbonLoaderUtil.readCurrentTime)
+        val loadStatus = new CarbonAggTableRDD(newDF.rdd, sqlContext.sparkContext,
+          carbonLoadModel, new DataLoadResultImpl(), segmentId, aggColCardinality).collect
+        val metadataDetails = loadStatus(0)._2
+        // initialize aggregate carbonDataload model to write tableStatus file
+        val aggLoadModel: CarbonLoadModel = new CarbonLoadModel()
+        val dataLoadSchema = new CarbonDataLoadSchema(aggTable)
+        aggLoadModel.setCarbonDataLoadSchema(dataLoadSchema)
+        aggLoadModel.setTableName(carbonLoadModel.getAggTableName)
+        val recordStatus = CarbonLoaderUtil.recordLoadMetadata(Integer.valueOf(segmentId),
+          metadataDetails, aggLoadModel, CarbonCommonConstants.STORE_LOADSTATUS_SUCCESS,
+          carbonLoadModel.getFactTimeStamp)
+        if (!recordStatus) {
+          sys.error(s"write table status file failed for aggTable on segment $segmentId")
+        }
+      }
+    }
+  }
 }
 
 private[sql] case class DescribeCommandFormatted(

@@ -71,6 +71,11 @@ class CarbonStrategies(sqlContext: SQLContext) extends QueryPlanner[SparkPlan] {
             profile,
             aliasMap,
             planLater(child))(sqlContext) :: Nil
+        case CarbonDictionaryCatalystIntType(relations, profile, aliasMap, _, child) =>
+          CarbonDictionaryIntToString(relations,
+            profile,
+            aliasMap,
+            planLater(child))(sqlContext) :: Nil
         case _ =>
           Nil
       }
@@ -92,7 +97,8 @@ class CarbonStrategies(sqlContext: SQLContext) extends QueryPlanner[SparkPlan] {
       val projectSet = AttributeSet(projectList.flatMap(_.references))
       val filterSet = AttributeSet(predicates.flatMap(_.references))
 
-      val scan = CarbonScan(projectSet.toSeq, relation.carbonRelation, predicates)(sqlContext)
+      val scan = CarbonScan(projectSet.toSeq, relation.carbonRelation,
+        predicates, relation.segmentId)(sqlContext)
       projectList.map {
         case attr: AttributeReference =>
         case Alias(attr: AttributeReference, _) =>
@@ -149,6 +155,7 @@ class CarbonStrategies(sqlContext: SQLContext) extends QueryPlanner[SparkPlan] {
       val scan = CarbonScan(projectList.map(_.toAttribute),
         relation.carbonRelation,
         predicates,
+        relation.segmentId,
         useUnsafeCoversion = false)(sqlContext)
       projectExprsNeedToDecode.addAll(scan.attributesNeedToDecode)
       val updatedAttrs = scan.attributesRaw.map(attr =>

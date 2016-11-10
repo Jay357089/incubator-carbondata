@@ -44,6 +44,11 @@ public final class CarbonCommonConstants {
    * BYTE_ENCODING
    */
   public static final String BYTE_ENCODING = "ISO-8859-1";
+
+  /**
+   * segment id for loading into aggregate table
+   */
+  public static final String AGGREGATE_SEGMENT_ID = "aggregate.segmentId";
   /**
    * measure meta data file name
    */
@@ -161,6 +166,10 @@ public final class CarbonCommonConstants {
    * DUMMY aggregation function
    */
   public static final String DUMMY = "dummy";
+  /**
+   * Aggregation table flag
+   */
+  public static final String AGG_TABLE_FLAG = "agg";
   /**
    * MEMBER_DEFAULT_VAL
    */
@@ -460,6 +469,10 @@ public final class CarbonCommonConstants {
    */
   public static final String FILE_SEPARATOR = "/";
   /**
+   * File separator
+   */
+  public static final String WINDOWS_FILE_SEPARATOR = "\\";
+  /**
    * MAX_QUERY_EXECUTION_TIME
    */
   public static final String MAX_QUERY_EXECUTION_TIME = "max.query.execution.time";
@@ -719,6 +732,9 @@ public final class CarbonCommonConstants {
   public static final String COLUMN_PROPERTIES = "columnproperties";
   // table block size in MB
   public static final String TABLE_BLOCKSIZE = "table_blocksize";
+  public static final String QUERYSQL_ON_FACTTABLE = "querySql_on_facttable";
+  public static final String MAIN_TABLE_NAME = "main_table_name";
+  public static final String isAggTable = "is_aggTable";
 
   /**
    * this variable is to enable/disable identify high cardinality during first data loading
@@ -856,6 +872,12 @@ public final class CarbonCommonConstants {
    */
   public static String majorCompactionRequiredFile = "compactionRequired_major";
 
+  /**
+   *  wthether use aggregate table, default is true.
+   */
+  public static String ENABLE_USE_AGG_TABLE = "carbon.use.aggregate.table";
+
+  public static String DEFAULT_ENABLE_USE_AGG_TABLE = "true";
   /**
    * @Deprecated : This property has been deprecated.
    * Property for enabling system level compaction lock.1 compaction can run at once.
