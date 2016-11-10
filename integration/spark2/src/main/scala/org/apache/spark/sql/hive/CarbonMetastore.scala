@@ -34,6 +34,7 @@ import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.carbon.CarbonTableIdentifier
 import org.apache.carbondata.core.carbon.metadata.CarbonMetadata
 import org.apache.carbondata.core.carbon.metadata.converter.ThriftWrapperSchemaConverterImpl
+import org.apache.carbondata.core.carbon.metadata.encoder.Encoding
 import org.apache.carbondata.core.carbon.metadata.schema.table.CarbonTable
 import org.apache.carbondata.core.carbon.metadata.schema.table.column.CarbonDimension
 import org.apache.carbondata.core.carbon.path.{CarbonStorePath, CarbonTablePath}
@@ -51,7 +52,7 @@ import org.apache.carbondata.lcm.locks.ZookeeperInit
 import org.apache.carbondata.lcm.status.SegmentStatusManager
 import org.apache.carbondata.spark.util.CarbonSparkUtil
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.{RuntimeConfig, SparkSession}
+import org.apache.spark.sql.{CarbonDataFrameWriter, RuntimeConfig, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
 
 case class MetaData(var tablesMeta: ArrayBuffer[TableMeta])
@@ -88,6 +89,93 @@ object CarbonMetastore {
     } finally {
       thriftWriter.close()
     }
+  }
+
+  /**
+    * for example, sum(id) will transform to sum_id,
+    * subString(id,1,3) will transform to subString_id_1_3
+    * @param aggregateFun
+    * @return expression
+    */
+  def convertFuncToExpression(aggregateFun: String): String = {
+    val arithmetics = Seq("_ADD_", "_SUB_", "_MUL_", "_DIV_")
+    val colName: StringBuilder = new StringBuilder()
+    for(alpha <- aggregateFun.toCharArray) {
+      val newAlpha: String =
+        if ((alpha >= 'a'&& alpha <= 'z')
+          || (alpha >= 'A'&& alpha <= 'Z')
+          || (alpha >= '0'&& alpha <= '9')
+          || alpha == '_') {
+          alpha.toString
+        } else if (alpha == '+') {
+          arithmetics(0)
+        } else if (alpha == '-') {
+          arithmetics(1)
+        } else if (alpha == '*') {
+          arithmetics(2)
+        } else if (alpha == '/') {
+          arithmetics(3)
+        } else {
+          "_"
+        }
+      colName.append(newAlpha)
+    }
+    colName.toString
+  }
+
+  def createAggTableSql(schema: StructType,
+                        factTable: CarbonTable,
+                        dataBaseName: String,
+                        aggTableName: String,
+                        groupByExp: Seq[String],
+                        aggregateExp: Seq[String]): String = {
+    var id: Int = -1
+    val aggTableSchema = schema.map { field =>
+      id += 1
+      s"${convertFuncToExpression(aggregateExp(id))} ${ field.dataType match {
+        case DecimalType.Fixed(precision, scale) => s"DECIMAL($precision, $scale)"
+        case other => CarbonDataFrameWriter
+          .convertToCarbonType(field.dataType) } }"
+    }
+    val aggregationTypes = Seq("SUM", "COUNT", "MAX", "MIN")
+    var dictExcludeCols: Seq[String] = Seq()
+    var dictIncludeCols: Seq[String] = Seq()
+    aggTableSchema.map { aggExpressionWithType =>
+      val schemaExp = aggExpressionWithType.split("\\s+")(0)
+      val schemaType = aggExpressionWithType.split("\\s+")(1)
+      val colSplits = schemaExp.split("_")
+      // column format, that is, dimenison
+      if (colSplits.length == 1) {
+        val dimenison = factTable.getDimensionByName(factTable.getFactTableName,
+          schemaExp)
+        if (dimenison.hasEncoding(Encoding.DICTIONARY) &&
+          !dimenison.hasEncoding(Encoding.DIRECT_DICTIONARY)) {
+          dictIncludeCols :+= schemaExp
+        } else if (!dimenison.hasEncoding(Encoding.DIRECT_DICTIONARY)) {
+          dictExcludeCols :+= schemaExp
+        }
+      } else {
+        // MAX(String) and MIN(String) should be no dictionary
+        if ((colSplits(0).equalsIgnoreCase(aggregationTypes(2)) ||
+          colSplits(0).equalsIgnoreCase(aggregationTypes(3))) &&
+          schemaType == "STRING") {
+          dictExcludeCols :+= schemaExp
+        } else if (!aggregationTypes.contains(colSplits(0).toUpperCase)) {
+          // the function is not aggregate functions, treate as no dictionary
+          dictExcludeCols :+= schemaExp
+        }
+      }
+    }
+    val dictInclude = if (dictIncludeCols.isEmpty) ""
+    else s"'DICTIONARY_INCLUDE'='${dictIncludeCols.mkString(",")}' "
+    val dictExclude = if (dictExcludeCols.isEmpty) ""
+    else s"'DICTIONARY_EXCLUDE'='${dictExcludeCols.mkString(",")}' "
+    val createSql = s"""
+          CREATE TABLE IF NOT EXISTS $dataBaseName.$aggTableName
+          (${ aggTableSchema.mkString(", ") })
+          USING org.apache.spark.sql.CarbonSource Options($dictInclude
+      ${if (dictInclude != "" && dictExclude != "") {","} else {""}} $dictExclude) """
+    createSql
   }
 
 }
@@ -166,6 +254,88 @@ class CarbonMetastore(conf: RuntimeConfig, val storePath: String) extends Loggin
       c => c.carbonTableIdentifier.getDatabaseName.equalsIgnoreCase(database) &&
            c.carbonTableIdentifier.getTableName.equalsIgnoreCase(tableIdentifier.table))
     tables.nonEmpty
+  }
+
+  // for aggregate table update
+  def updateAggTableSchema(dataBaseName: String,
+                           factTableName: String,
+                           aggTableName: String,
+                           querySqlonFact: String): Unit = {
+    val aggTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+      .getCarbonTable(dataBaseName + "_" + aggTableName)
+    val factTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+      .getCarbonTable(dataBaseName + "_" + factTableName)
+    // need to copy the dict dimension column from fact table
+    val dimensions = aggTable.getDimensionByTableName(aggTable.getFactTableName).asScala
+    val measures = aggTable.getMeasureByTableName(aggTable.getFactTableName).asScala
+    val dimColumns = dimensions.map { dimension =>
+      var dimColumn = dimension.getColumnSchema
+      if (dimension.getColumnSchema.hasEncoding(Encoding.DICTIONARY)) {
+        dimColumn = factTable.getDimensionByName(factTable.getFactTableName,
+          dimension.getColName).getColumnSchema
+      }
+      dimColumn
+    }
+    val measureColumns = measures.map(_.getColumnSchema)
+    val allColumns = dimColumns ++ measureColumns
+
+    val aggThriftTableInfo = CarbonMetastore.readSchemaFileToThriftTable(
+      aggTable.getMetaDataFilepath + File.separator + "schema")
+    val schemaConverter = new ThriftWrapperSchemaConverterImpl
+    val aggWrapperTableInfo = schemaConverter
+      .fromExternalToWrapperTableInfo(aggThriftTableInfo, dataBaseName,
+        aggTableName, aggTable.getStorePath)
+    // reset it.
+    aggWrapperTableInfo.getFactTable.setListOfColumns(allColumns.asJava)
+    aggWrapperTableInfo.getFactTable.getTableProperties.put(
+      CarbonCommonConstants.QUERYSQL_ON_FACTTABLE, querySqlonFact)
+    aggWrapperTableInfo.getFactTable.getTableProperties.put(
+      CarbonCommonConstants.MAIN_TABLE_NAME, factTableName)
+    aggWrapperTableInfo.getFactTable.getTableProperties.put(
+      CarbonCommonConstants.isAggTable, "true")
+    aggWrapperTableInfo.setLastUpdatedTime(System.currentTimeMillis())
+    val updatedAggThriftTableInfo = schemaConverter.fromWrapperToExternalTableInfo(
+      aggWrapperTableInfo, dataBaseName, aggTableName)
+    CarbonMetastore.writeThriftTableToSchemaFile(aggTable.getMetaDataFilepath
+      + File.separator + "schema", updatedAggThriftTableInfo)
+    aggWrapperTableInfo.setMetaDataFilepath(aggTable.getMetaDataFilepath)
+    CarbonMetadata.getInstance().loadTableMetadata(aggWrapperTableInfo)
+    updateSchemasUpdatedTime(touchSchemaFileSystemTime(dataBaseName, aggTableName))
+  }
+
+  // for fact tabel uopdate after create agg table
+  def updateFactTableSchema(dataBaseName: String,
+                            factTableName: String,
+                            aggTableName: String): Unit = {
+    // first to get fact tableInfo
+    // then get aggregation tableInfo
+    val factTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+      .getCarbonTable(dataBaseName + "_" + factTableName)
+    val factThriftTableInfo = CarbonMetastore.readSchemaFileToThriftTable(
+      factTable.getMetaDataFilepath + File.separator + "schema")
+    val schemaConverter = new ThriftWrapperSchemaConverterImpl
+    val factWrapperTableInfo = schemaConverter
+      .fromExternalToWrapperTableInfo(factThriftTableInfo, dataBaseName,
+        factTableName, factTable.getStorePath)
+    val aggTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+      .getCarbonTable(dataBaseName + "_" + aggTableName)
+    val aggThriftTableInfo = CarbonMetastore.readSchemaFileToThriftTable(
+      aggTable.getMetaDataFilepath + File.separator + "schema")
+    val aggWrapperTableInfo = schemaConverter
+      .fromExternalToWrapperTableInfo(aggThriftTableInfo, dataBaseName,
+        aggTableName, aggTable.getStorePath)
+    factWrapperTableInfo.getAggregateTableList.add(aggWrapperTableInfo.getFactTable)
+    factWrapperTableInfo.setLastUpdatedTime(System.currentTimeMillis)
+    // update schema file information
+    val updatedFactThriftTableInfo = schemaConverter.fromWrapperToExternalTableInfo(
+      factWrapperTableInfo, dataBaseName, factTableName)
+    CarbonMetastore.writeThriftTableToSchemaFile(factTable.getMetaDataFilepath
+      + File.separator + "schema", updatedFactThriftTableInfo)
+    // update meta
+    factWrapperTableInfo.setMetaDataFilepath(factTable.getMetaDataFilepath)
+    CarbonMetadata.getInstance().loadTableMetadata(factWrapperTableInfo)
+    LOGGER.info(s"table $dataBaseName.$factTableName's schema is updated successfully")
+    updateSchemasUpdatedTime(touchSchemaFileSystemTime(dataBaseName, factTableName))
   }
 
   def loadMetadata(metadataPath: String, queryId: String): MetaData = {

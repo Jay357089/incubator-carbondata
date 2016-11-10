@@ -31,6 +31,8 @@ class CarbonOption(options: Map[String, String]) {
 
   def tablePath: String = s"$dbName/$tableName"
 
+  def allowExisting: String = options.getOrElse("allowExisting", "true")
+
   def tableId: String = options.getOrElse("tableId", "default_table_id")
 
   def partitionCount: String = options.getOrElse("partitionCount", "1")

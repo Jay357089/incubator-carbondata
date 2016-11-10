@@ -24,10 +24,13 @@ import scala.collection.JavaConverters._
 import scala.language.implicitConversions
 
 import org.apache.spark.sql._
+import org.apache.spark.sql.catalyst.analysis.UnresolvedAlias
 import org.apache.spark.sql.catalyst.TableIdentifier
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Cast, Literal}
+import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.execution.{RunnableCommand, SparkPlan}
 import org.apache.spark.sql.hive.CarbonMetastore
+import org.apache.spark.sql.hive.{CarbonMetastoreCatalog, DistributionUtil}
 import org.apache.spark.sql.types.TimestampType
 import org.apache.spark.util.FileUtils
 import org.codehaus.jackson.map.ObjectMapper
@@ -42,6 +45,15 @@ import org.apache.carbondata.core.carbon.path.CarbonStorePath
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.datastorage.store.impl.FileFactory
 import org.apache.carbondata.core.util.{CarbonProperties, CarbonUtil}
+import org.apache.carbondata.core.carbon.metadata.schema.{SchemaEvolution, SchemaEvolutionEntry}
+import org.apache.carbondata.core.carbon.metadata.schema.table.{CarbonTable, TableInfo, TableSchema}
+import org.apache.carbondata.core.carbon.metadata.schema.table.column.{CarbonDimension, ColumnSchema}
+import org.apache.carbondata.core.carbon.path.CarbonStorePath
+import org.apache.carbondata.core.constants.CarbonCommonConstants
+import org.apache.carbondata.core.datastorage.store.impl.FileFactory
+import org.apache.carbondata.core.load.LoadMetadataDetails
+import org.apache.carbondata.core.util.{CarbonProperties, CarbonUtil, DataFileFooterConverter}
+import org.apache.carbondata.integration.spark.merger.CompactionType
 import org.apache.carbondata.lcm.locks.{CarbonLockFactory, LockUsage}
 import org.apache.carbondata.lcm.status.SegmentStatusManager
 import org.apache.carbondata.processing.constants.TableOptionConstant
@@ -50,6 +62,386 @@ import org.apache.carbondata.processing.model.CarbonLoadModel
 import org.apache.carbondata.spark.exception.MalformedCarbonCommandException
 import org.apache.carbondata.spark.rdd.{CarbonDataRDDFactory, DictionaryLoadModel}
 import org.apache.carbondata.spark.util.{CarbonScalaUtil, GlobalDictionaryUtil}
+import org.apache.carbondata.spark.{CarbonDataFrameWriter, CarbonSparkFactory, DataLoadResultImpl}
+import org.apache.carbondata.spark.exception.MalformedCarbonCommandException
+import org.apache.carbondata.spark.load._
+import org.apache.carbondata.spark.rdd.{CarbonAggTableRDD, CarbonDataRDDFactory}
+import org.apache.carbondata.spark.util.{CarbonScalaUtil, DataTypeConverterUtil, GlobalDictionaryUtil}
+
+case class tableModel(
+    ifNotExistsSet: Boolean,
+    var databaseName: String,
+    databaseNameOp: Option[String],
+    tableName: String,
+    tableProperties: Map[String, String],
+    dimCols: Seq[Field],
+    msrCols: Seq[Field],
+    highcardinalitydims: Option[Seq[String]],
+    noInvertedIdxCols: Option[Seq[String]],
+    partitioner: Option[Partitioner],
+    columnGroups: Seq[String],
+    colProps: Option[util.Map[String, util.List[ColumnProperty]]] = None)
+
+case class Field(column: String, var dataType: Option[String], name: Option[String],
+    children: Option[List[Field]], parent: String = null,
+    storeType: Option[String] = Some("columnar"),
+    var precision: Int = 0, var scale: Int = 0)
+
+case class ColumnProperty(key: String, value: String)
+
+case class ComplexField(complexType: String, primitiveField: Option[Field],
+    complexField: Option[ComplexField])
+
+case class Partitioner(partitionClass: String, partitionColumn: Array[String], partitionCount: Int,
+    nodeList: Array[String])
+
+case class PartitionerField(partitionColumn: String, dataType: Option[String],
+    columnComment: String)
+
+case class DataLoadTableFileMapping(table: String, loadPath: String)
+
+case class CarbonMergerMapping(storeLocation: String,
+    storePath: String,
+    metadataFilePath: String,
+    mergedLoadName: String,
+    kettleHomePath: String,
+    tableCreationTime: Long,
+    databaseName: String,
+    factTableName: String,
+    validSegments: Array[String],
+    tableId: String,
+    // maxSegmentColCardinality is Cardinality of last segment of compaction
+    var maxSegmentColCardinality: Array[Int],
+    // maxSegmentColumnSchemaList is list of column schema of last segment of compaction
+    var maxSegmentColumnSchemaList: List[ColumnSchema])
+
+case class NodeInfo(TaskId: String, noOfBlocks: Int)
+
+case class AlterTableModel(dbName: Option[String], tableName: String,
+    compactionType: String, alterSql: String)
+
+case class CompactionModel(compactionSize: Long,
+    compactionType: CompactionType,
+    carbonTable: CarbonTable,
+    tableCreationTime: Long,
+    isDDLTrigger: Boolean)
+
+case class CompactionCallableModel(storePath: String,
+    carbonLoadModel: CarbonLoadModel,
+    storeLocation: String,
+    carbonTable: CarbonTable,
+    kettleHomePath: String,
+    cubeCreationTime: Long,
+    loadsToMerge: util.List[LoadMetadataDetails],
+    sqlContext: SQLContext,
+    compactionType: CompactionType)
+
+object TableNewProcessor {
+  def apply(cm: tableModel, sqlContext: SQLContext): TableInfo = {
+    new TableNewProcessor(cm, sqlContext).process
+  }
+}
+
+class TableNewProcessor(cm: tableModel, sqlContext: SQLContext) {
+
+  var index = 0
+  var rowGroup = 0
+
+  def getAllChildren(fieldChildren: Option[List[Field]]): Seq[ColumnSchema] = {
+    var allColumns: Seq[ColumnSchema] = Seq[ColumnSchema]()
+    fieldChildren.foreach(fields => {
+      fields.foreach(field => {
+        val encoders = new java.util.ArrayList[Encoding]()
+        encoders.add(Encoding.DICTIONARY)
+        val columnSchema: ColumnSchema = getColumnSchema(
+          DataTypeConverterUtil.convertToCarbonType(field.dataType.getOrElse("")),
+          field.name.getOrElse(field.column), index,
+          isCol = true, encoders, isDimensionCol = true, rowGroup, field.precision, field.scale)
+        allColumns ++= Seq(columnSchema)
+        index = index + 1
+        rowGroup = rowGroup + 1
+        if (field.children.get != null) {
+          columnSchema.setNumberOfChild(field.children.get.size)
+          allColumns ++= getAllChildren(field.children)
+        }
+      })
+    })
+    allColumns
+  }
+
+  def getColumnSchema(dataType: DataType, colName: String, index: Integer, isCol: Boolean,
+      encoders: java.util.List[Encoding], isDimensionCol: Boolean,
+      colGroup: Integer, precision: Integer, scale: Integer): ColumnSchema = {
+    val columnSchema = new ColumnSchema()
+    columnSchema.setDataType(dataType)
+    columnSchema.setColumnName(colName)
+    val highCardinalityDims = cm.highcardinalitydims.getOrElse(Seq())
+    if (highCardinalityDims.contains(colName)) {
+      encoders.remove(encoders.remove(Encoding.DICTIONARY))
+    }
+    if (dataType == DataType.TIMESTAMP) {
+      encoders.add(Encoding.DIRECT_DICTIONARY)
+    }
+    val colPropMap = new java.util.HashMap[String, String]()
+    if (cm.colProps.isDefined && null != cm.colProps.get.get(colName)) {
+      val colProps = cm.colProps.get.get(colName)
+      colProps.asScala.foreach { x => colPropMap.put(x.key, x.value) }
+    }
+    columnSchema.setColumnProperties(colPropMap)
+    columnSchema.setEncodingList(encoders)
+    val colUniqueIdGenerator = CarbonCommonFactory.getColumnUniqueIdGenerator
+    val columnUniqueId = colUniqueIdGenerator.generateUniqueId(cm.databaseName,
+      columnSchema)
+    columnSchema.setColumnUniqueId(columnUniqueId)
+    columnSchema.setColumnReferenceId(columnUniqueId)
+    columnSchema.setColumnar(isCol)
+    columnSchema.setDimensionColumn(isDimensionCol)
+    columnSchema.setColumnGroup(colGroup)
+    columnSchema.setPrecision(precision)
+    columnSchema.setScale(scale)
+    // TODO: Need to fill RowGroupID, converted type
+    // & Number of Children after DDL finalization
+    columnSchema
+  }
+
+  // process create dml fields and create wrapper TableInfo object
+  def process: TableInfo = {
+    val LOGGER = LogServiceFactory.getLogService(TableNewProcessor.getClass.getName)
+    var allColumns = Seq[ColumnSchema]()
+    var index = 0
+    cm.dimCols.foreach(field => {
+      val encoders = new java.util.ArrayList[Encoding]()
+      encoders.add(Encoding.DICTIONARY)
+      val columnSchema: ColumnSchema = getColumnSchema(
+        DataTypeConverterUtil.convertToCarbonType(field.dataType.getOrElse("")),
+        field.name.getOrElse(field.column),
+        index,
+        isCol = true,
+        encoders,
+        isDimensionCol = true,
+        -1,
+        field.precision,
+        field.scale)
+      allColumns ++= Seq(columnSchema)
+      index = index + 1
+      if (field.children.isDefined && field.children.get != null) {
+        columnSchema.setNumberOfChild(field.children.get.size)
+        allColumns ++= getAllChildren(field.children)
+      }
+    })
+
+    cm.msrCols.foreach(field => {
+      val encoders = new java.util.ArrayList[Encoding]()
+      val columnSchema: ColumnSchema = getColumnSchema(
+        DataTypeConverterUtil.convertToCarbonType(field.dataType.getOrElse("")),
+        field.name.getOrElse(field.column),
+        index,
+        isCol = true,
+        encoders,
+        isDimensionCol = false,
+        -1,
+        field.precision,
+        field.scale)
+      val measureCol = columnSchema
+
+      allColumns ++= Seq(measureCol)
+      index = index + 1
+    })
+
+    // Check if there is any duplicate measures or dimensions.
+    // Its based on the dimension name and measure name
+    allColumns.groupBy(_.getColumnName).foreach(f => if (f._2.size > 1) {
+      val name = f._1
+      LOGGER.error(s"Duplicate column found with name: $name")
+      LOGGER.audit(
+        s"Validation failed for Create/Alter Table Operation " +
+        s"for ${ cm.databaseName }.${ cm.tableName }" +
+        s"Duplicate column found with name: $name")
+      sys.error(s"Duplicate dimensions found with name: $name")
+    })
+
+    val highCardinalityDims = cm.highcardinalitydims.getOrElse(Seq())
+
+    checkColGroupsValidity(cm.columnGroups, allColumns, highCardinalityDims)
+
+    updateColumnGroupsInFields(cm.columnGroups, allColumns)
+
+    var newOrderedDims = scala.collection.mutable.ListBuffer[ColumnSchema]()
+    val complexDims = scala.collection.mutable.ListBuffer[ColumnSchema]()
+    val measures = scala.collection.mutable.ListBuffer[ColumnSchema]()
+    for (column <- allColumns) {
+      if (highCardinalityDims.contains(column.getColumnName)) {
+        newOrderedDims += column
+      } else if (column.isComplex) {
+        complexDims += column
+      } else if (column.isDimensionColumn) {
+        newOrderedDims += column
+      } else {
+        measures += column
+      }
+
+    }
+
+    // Setting the boolean value of useInvertedIndex in column schema
+    val noInvertedIndexCols = cm.noInvertedIdxCols.getOrElse(Seq())
+    for (column <- allColumns) {
+      // When the column is measure or the specified no inverted index column in DDL,
+      // set useInvertedIndex to false, otherwise true.
+      if (noInvertedIndexCols.contains(column.getColumnName) ||
+          cm.msrCols.exists(_.column.equalsIgnoreCase(column.getColumnName))) {
+        column.setUseInvertedIndex(false)
+      } else {
+        column.setUseInvertedIndex(true)
+      }
+    }
+
+    // Adding dummy measure if no measure is provided
+    if (measures.size < 1) {
+      val encoders = new java.util.ArrayList[Encoding]()
+      val columnSchema: ColumnSchema = getColumnSchema(DataType.DOUBLE,
+        CarbonCommonConstants.DEFAULT_INVISIBLE_DUMMY_MEASURE,
+        index,
+        true,
+        encoders,
+        false,
+        -1, 0, 0)
+      columnSchema.setInvisible(true)
+      val measureColumn = columnSchema
+      measures += measureColumn
+      allColumns = allColumns ++ measures
+    }
+    val columnValidator = CarbonSparkFactory.getCarbonColumnValidator()
+    columnValidator.validateColumns(allColumns)
+    newOrderedDims = newOrderedDims ++ complexDims ++ measures
+
+    cm.partitioner match {
+      case Some(part: Partitioner) =>
+        var definedpartCols = part.partitionColumn
+        val columnBuffer = new ArrayBuffer[String]
+        part.partitionColumn.foreach { col =>
+          newOrderedDims.foreach { dim =>
+            if (dim.getColumnName.equalsIgnoreCase(col)) {
+              definedpartCols = definedpartCols.dropWhile { c => c.equals(col) }
+              columnBuffer += col
+            }
+          }
+        }
+
+        // Special Case, where Partition count alone is sent to Carbon for dataloading
+        if (part.partitionClass.isEmpty) {
+          if (part.partitionColumn(0).isEmpty) {
+            Partitioner(
+              "org.apache.carbondata.spark.partition.api.impl.SampleDataPartitionerImpl",
+              Array(""), part.partitionCount, null)
+          } else {
+            // case where partition cols are set and partition class is not set.
+            // so setting the default value.
+            Partitioner(
+              "org.apache.carbondata.spark.partition.api.impl.SampleDataPartitionerImpl",
+              part.partitionColumn, part.partitionCount, null)
+          }
+        } else if (definedpartCols.nonEmpty) {
+          val msg = definedpartCols.mkString(", ")
+          LOGGER.error(s"partition columns specified are not part of Dimension columns: $msg")
+          LOGGER.audit(
+            s"Validation failed for Create/Alter Table Operation for " +
+            s"${ cm.databaseName }.${ cm.tableName } " +
+            s"partition columns specified are not part of Dimension columns: $msg")
+          sys.error(s"partition columns specified are not part of Dimension columns: $msg")
+        } else {
+
+          try {
+            Class.forName(part.partitionClass).newInstance()
+          } catch {
+            case e: Exception =>
+              val cl = part.partitionClass
+              LOGGER.audit(
+                s"Validation failed for Create/Alter Table Operation for " +
+                s"${ cm.databaseName }.${ cm.tableName } " +
+                s"partition class specified can not be found or loaded: $cl")
+              sys.error(s"partition class specified can not be found or loaded: $cl")
+          }
+
+          Partitioner(part.partitionClass, columnBuffer.toArray, part.partitionCount, null)
+        }
+      case None =>
+        Partitioner("org.apache.carbondata.spark.partition.api.impl.SampleDataPartitionerImpl",
+          Array(""), 20, null)
+    }
+    val tableInfo = new TableInfo()
+    val tableSchema = new TableSchema()
+    val schemaEvol = new SchemaEvolution()
+    schemaEvol
+      .setSchemaEvolutionEntryList(new util.ArrayList[SchemaEvolutionEntry]())
+    tableSchema.setTableId(UUID.randomUUID().toString)
+    // populate table properties map
+    val tablePropertiesMap = new java.util.HashMap[String, String]()
+    cm.tableProperties.foreach {
+      x => tablePropertiesMap.put(x._1, x._2)
+    }
+    tableSchema.setTableProperties(tablePropertiesMap)
+    tableSchema.setTableName(cm.tableName)
+    tableSchema.setListOfColumns(allColumns.asJava)
+    tableSchema.setSchemaEvalution(schemaEvol)
+    tableInfo.setDatabaseName(cm.databaseName)
+    tableInfo.setTableUniqueName(cm.databaseName + "_" + cm.tableName)
+    tableInfo.setLastUpdatedTime(System.currentTimeMillis())
+    tableInfo.setFactTable(tableSchema)
+    tableInfo.setAggregateTableList(new util.ArrayList[TableSchema]())
+    tableInfo
+  }
+
+  //  For checking if the specified col group columns are specified in fields list.
+  protected def checkColGroupsValidity(colGrps: Seq[String],
+      allCols: Seq[ColumnSchema],
+      highCardCols: Seq[String]): Unit = {
+    if (null != colGrps) {
+      colGrps.foreach(columngroup => {
+        val rowCols = columngroup.split(",")
+        rowCols.foreach(colForGrouping => {
+          var found: Boolean = false
+          // check for dimensions + measures
+          allCols.foreach(eachCol => {
+            if (eachCol.getColumnName.equalsIgnoreCase(colForGrouping.trim())) {
+              found = true
+            }
+          })
+          // check for No Dicitonary dimensions
+          highCardCols.foreach(noDicCol => {
+            if (colForGrouping.trim.equalsIgnoreCase(noDicCol)) {
+              found = true
+            }
+          })
+
+          if (!found) {
+            sys.error(s"column $colForGrouping is not present in Field list")
+          }
+        })
+      })
+    }
+  }
+
+  // For updating the col group details for fields.
+  private def updateColumnGroupsInFields(colGrps: Seq[String], allCols: Seq[ColumnSchema]): Unit = {
+    if (null != colGrps) {
+      var colGroupId = -1
+      colGrps.foreach(columngroup => {
+        colGroupId += 1
+        val rowCols = columngroup.split(",")
+        rowCols.foreach(row => {
+
+          allCols.foreach(eachCol => {
+
+            if (eachCol.getColumnName.equalsIgnoreCase(row.trim)) {
+              eachCol.setColumnGroup(colGroupId)
+              eachCol.setColumnar(false)
+            }
+          })
+        })
+      })
+    }
+  }
+}
 
 /**
  * Command for the compaction in alter table command
@@ -572,6 +964,15 @@ private[sql] case class DropTableCommand(ifExistsSet: Boolean, databaseNameOp: O
     val dbName = getDB.getDatabaseName(databaseNameOp, sqlContext)
     val identifier = TableIdentifier(tableName, Option(dbName))
     val carbonTableIdentifier = new CarbonTableIdentifier(dbName, tableName, "")
+    // check whther aggregate table exits
+    val carbontable = CarbonMetadata.getInstance().getCarbonTable(dbName +
+      CarbonCommonConstants.UNDERSCORE + tableName)
+    var aggTableList: List[(String, String)] = List()
+    if (!carbontable.getAggregateTablesName.isEmpty) {
+      carbontable.getAggregateTablesName.asScala.foreach { aggName =>
+        aggTableList :+= (dbName, aggName)
+      }
+    }
     val carbonLock = CarbonLockFactory
       .getCarbonLockObj(carbonTableIdentifier, LockUsage.DROP_TABLE_LOCK)
     val storePath = CarbonEnv.get.carbonMetastore.storePath
@@ -606,6 +1007,12 @@ private[sql] case class DropTableCommand(ifExistsSet: Boolean, databaseNameOp: O
           if (FileFactory.isFileExist(badLogPath, badLogFileType)) {
             val file = FileFactory.getCarbonFile(badLogPath, badLogFileType)
             CarbonUtil.deleteFoldersAndFiles(file)
+          }
+          // drop aggregate Table
+          if (aggTableList.nonEmpty) {
+            aggTableList.foreach { aggtable =>
+              sqlContext.sql(s"DROP TABLE ${aggtable._1}.${aggtable._2}")
+            }
           }
         } else {
           logError("Unable to unlock Table MetaData")
@@ -676,6 +1083,204 @@ private[sql] case class ShowLoads(
     }
   }
 
+}
+
+private[sql] case class CreateCarbonTableAsSelect(
+    databaseName: Option[String],
+    tableName: String,
+    allowExisting: Boolean,
+    createSql: String) extends RunnableCommand {
+
+  val LOGGER = LogServiceFactory.getLogService(this.getClass.getCanonicalName)
+
+  override def run(sqlContext: SQLContext): Seq[Row] = {
+    val dbName = getDB.getDatabaseName(databaseName, sqlContext)
+    val options = Map("dbName" -> dbName,
+      "tableName" -> tableName,
+      "allowExisting" -> allowExisting.toString)
+    // split first to make sure getting the exact SELECT index
+    val queryTokens = createSql.split("\\s+")
+    val selectIndex = queryTokens.indexWhere(_.equalsIgnoreCase("SELECT"))
+    val subQuery = new Array[String](queryTokens.length - selectIndex)
+    Array.copy(queryTokens, selectIndex, subQuery, 0, subQuery.length)
+    // check whether is for creating aggregation table
+    val (factTable, aggFlag) = tableName.splitAt(tableName.indexOf("_"))
+    val factTableExists = CarbonEnv.getInstance(sqlContext).carbonCatalog
+      .tableExists(TableIdentifier(factTable, databaseName))(sqlContext)
+    if (factTableExists &&
+      aggFlag.split("_")(1).equalsIgnoreCase(CarbonCommonConstants.AGG_TABLE_FLAG)) {
+      val factCarbonTable = CarbonMetadata.getInstance.getCarbonTable(dbName +
+      CarbonCommonConstants.UNDERSCORE + factTable)
+      // aggregate table index number.
+      var index = 0
+      if (!factCarbonTable.getAggregateTablesName.isEmpty) {
+        index = factCarbonTable.getAggregateTablesName.size
+      }
+      val aggTableName = tableName + CarbonCommonConstants.UNDERSCORE + index
+      CreateAggTable(dbName, factTable, aggTableName, options, subQuery).run(sqlContext)
+    } else {
+      val subLogicalPlan = sqlContext.parseSql(subQuery.mkString(" "))
+      val dataFrame = DataFrame(sqlContext, subLogicalPlan)
+      new CarbonDataFrameWriter(dataFrame).saveAsCarbonFile(options.toMap)
+    }
+    Seq.empty
+  }
+}
+
+private[sql] case class CreateAggTable(
+    databaseName: String,
+    factTableName: String,
+    aggTableName: String,
+    options: Map[String, String],
+    subQuery: Array[String]) extends RunnableCommand {
+
+  val LOGGER = LogServiceFactory.getLogService(this.getClass.getCanonicalName)
+
+  override def run(sqlContext: SQLContext): Seq[Row] = {
+    LOGGER.info(s"Creating aggregation table: $aggTableName " +
+      s"for factable: $databaseName.$factTableName}")
+    val factTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+      .getCarbonTable(databaseName + "_" + factTableName)
+    val querySql = subQuery.mkString(" ")
+    val queryExecution = sqlContext.sql(querySql).queryExecution
+    val childPlan = queryExecution.optimizedPlan
+    var groupByExp: Seq[String] = Seq()
+    var aggregateExp: Seq[String] = Seq()
+    childPlan.foreach {
+      case Aggregate(groupExp, aggExp, _) =>
+        groupExp.foreach {
+          groupByExp :+= _.asInstanceOf[AttributeReference].name.toLowerCase
+        }
+        aggExp.foreach { exp =>
+          exp match {
+            case AttributeReference(name, _, _, _) =>
+              aggregateExp :+= name.toLowerCase
+            case Alias(child, _) =>
+              aggregateExp :+= child.prettyString
+            case other =>
+          }
+        }
+      case other =>
+    }
+    var addToProject: ArrayBuffer[String] = ArrayBuffer()
+    groupByExp.foreach { groupByCol =>
+      if (!aggregateExp.contains(groupByCol)) {
+        addToProject :+= groupByCol
+      }
+    }
+    // need to add to aggreagete expression
+    aggregateExp ++:= addToProject
+    // create agg table based on subquery schema
+    sqlContext.sql(CarbonMetastoreCatalog.createAggTableSql(
+      queryExecution.analyzed.schema, factTable, databaseName,
+      aggTableName, groupByExp, aggregateExp))
+    // add aggregate table info to fact table's schema
+    // add query Sql on fact table to aggregate table's table properties
+    val catalog = CarbonEnv.getInstance(sqlContext).carbonCatalog
+    catalog.updateAggTableSchema(databaseName, factTableName, aggTableName, querySql)
+    // load into aggregate table for every segment
+    LoadIntoAggTable(databaseName, factTableName, aggTableName).run(sqlContext)
+    catalog.updateFactTableSchema(databaseName, factTableName, aggTableName)
+    Seq.empty
+  }
+}
+
+private[sql] case class LoadIntoAggTable(
+    dataBaseName: String,
+    factTableName: String,
+    aggTableName: String)
+  extends RunnableCommand {
+
+  override def run(sqlContext: SQLContext): Seq[Row] = {
+    val factTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+      .getCarbonTable(dataBaseName + "_" + factTableName)
+    val carbonLoadModel = new CarbonLoadModel
+    // try to follow the load step, but ignore csvInput and surrogateKeyStep
+    val dataLoadSchema = new CarbonDataLoadSchema(factTable)
+    carbonLoadModel.setCarbonDataLoadSchema(dataLoadSchema)
+    carbonLoadModel.setTableName(factTableName)
+    carbonLoadModel.setDatabaseName(dataBaseName)
+    carbonLoadModel.setStorePath(factTable.getStorePath)
+    val kettleHome = CarbonScalaUtil.getKettleHome(sqlContext)
+    carbonLoadModel.setKettleHomePath(kettleHome)
+    carbonLoadModel.setAggTables(Array(aggTableName))
+    // Check if any load need to be deleted before loading new data
+    CarbonDataRDDFactory.deleteLoadsAndUpdateMetadata(carbonLoadModel,
+      factTable, factTable.getStorePath, isForceDeletion = false)
+    if (null == carbonLoadModel.getLoadMetadataDetails) {
+      CarbonDataRDDFactory.readLoadMetadataDetails(carbonLoadModel, factTable.getStorePath)
+    }
+    var segmentLists: List[String] = List()
+    carbonLoadModel.getLoadMetadataDetails.asScala.foreach {
+      segmentLists :+= _.getLoadName
+    }
+    LoadIntoAggTable.loadIntoAggTableBySegment(sqlContext, carbonLoadModel, segmentLists)
+
+    Seq.empty
+  }
+}
+
+object LoadIntoAggTable {
+
+  // API for load into aggregation table.
+  def loadIntoAggTableBySegment(sqlContext: SQLContext,
+    carbonLoadModel: CarbonLoadModel,
+    segmentList: List[String]): Unit = {
+    val factTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+      .getCarbonTable(carbonLoadModel.getDatabaseName + "_" + carbonLoadModel.getTableName)
+    // for every agg table, every segment, do loading
+    carbonLoadModel.getAggTables.foreach { aggTableName =>
+      val aggTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+        .getCarbonTable(carbonLoadModel.getDatabaseName + "_" + aggTableName)
+      carbonLoadModel.setAggTableName(aggTableName)
+      val subQuerySql = aggTable.getQuerySqlOnFactTable
+      val childPlan = sqlContext.parseSql(subQuerySql)
+      segmentList.foreach { segmentId =>
+        // need to get cardinality from fact table
+        val fileFooterConverter: DataFileFooterConverter = new DataFileFooterConverter
+        val factColCardinality = fileFooterConverter.getColumnCardinality(
+          carbonLoadModel.getStorePath, carbonLoadModel.getDatabaseName,
+          carbonLoadModel.getTableName, segmentId)
+        // first to initialize as -1, which means noDict.
+        val aggDimlenth = aggTable.getNumberOfDimensions(aggTableName)
+        val aggColCardinality: Array[Int] = new Array(aggDimlenth)
+        for(i <- 0 until aggDimlenth) {
+          aggColCardinality(i) = -1
+        }
+        var index: Int = -1
+        factTable.getDimensionByTableName(factTable.getFactTableName).asScala.foreach {dim =>
+          index += 1
+          val aggIndex = aggTable.getDimensionByTableName(aggTable.getFactTableName).asScala
+            .map(_.getColName).indexOf(dim.getColName)
+          if(aggIndex != -1) {
+            aggColCardinality(aggIndex) = factColCardinality(index)
+          }
+        }
+        // use DataFrame to load data.
+        val childPlanForSegment = AddSegmentId(Some(segmentId), childPlan)
+        val dataFrame = DataFrame(sqlContext, childPlanForSegment)
+        // start to load into aggtable
+        var numPartitions = DistributionUtil.getNodeList(sqlContext.sparkContext).length
+        numPartitions = Math.max(1, Math.min(numPartitions, dataFrame.rdd.partitions.length))
+        val newDF = dataFrame.coalesce(numPartitions)
+        carbonLoadModel.setFactTimeStamp(CarbonLoaderUtil.readCurrentTime)
+        val loadStatus = new CarbonAggTableRDD(newDF.rdd, sqlContext.sparkContext,
+          carbonLoadModel, new DataLoadResultImpl(), segmentId, aggColCardinality).collect
+        val metadataDetails = loadStatus(0)._2
+        // initialize aggregate carbonDataload model to write tableStatus file
+        val aggLoadModel: CarbonLoadModel = new CarbonLoadModel()
+        val dataLoadSchema = new CarbonDataLoadSchema(aggTable)
+        aggLoadModel.setCarbonDataLoadSchema(dataLoadSchema)
+        aggLoadModel.setTableName(carbonLoadModel.getAggTableName)
+        val recordStatus = CarbonLoaderUtil.recordLoadMetadata(Integer.valueOf(segmentId),
+          metadataDetails, aggLoadModel, CarbonCommonConstants.STORE_LOADSTATUS_SUCCESS,
+          carbonLoadModel.getFactTimeStamp)
+        if (!recordStatus) {
+          sys.error(s"write table status file failed for aggTable on segment $segmentId")
+        }
+      }
+    }
+  }
 }
 
 private[sql] case class DescribeCommandFormatted(

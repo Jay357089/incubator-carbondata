@@ -50,8 +50,8 @@ class CarbonSource extends CreatableRelationProvider
     CarbonEnv.init(sqlContext)
     // User should not specify path since only one store is supported in carbon currently,
     // after we support multi-store, we can remove this limitation
-//    require(!parameters.contains("path"), "'path' should not be specified, " +
-//        "the path to store carbon file is the 'storePath' specified when creating CarbonContext")
+    require(!parameters.contains("path"), "'path' should not be specified, " +
+        "the path to store carbon file is the 'storePath' specified when creating CarbonContext")
 
     val options = new CarbonOption(parameters)
     val storePath = sqlContext.sparkSession.conf.get(CarbonCommonConstants.STORE_LOCATION)

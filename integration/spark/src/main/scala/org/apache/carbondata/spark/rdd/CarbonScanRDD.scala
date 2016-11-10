@@ -37,9 +37,12 @@ import org.apache.carbondata.core.carbon.AbsoluteTableIdentifier
 import org.apache.carbondata.core.carbon.datastore.block.Distributable
 import org.apache.carbondata.core.carbon.metadata.schema.table.CarbonTable
 import org.apache.carbondata.core.carbon.querystatistics.{QueryStatistic, QueryStatisticsConstants}
+import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.util.CarbonTimeStatisticsFactory
 import org.apache.carbondata.hadoop.{CarbonInputFormat, CarbonInputSplit, CarbonMultiBlockSplit, CarbonProjection}
 import org.apache.carbondata.hadoop.readsupport.impl.RawDataReadSupport
+import org.apache.carbondata.lcm.status.SegmentStatusManager
+import org.apache.carbondata.scan.executor.QueryExecutorFactory
 import org.apache.carbondata.scan.expression.Expression
 import org.apache.carbondata.spark.load.CarbonLoaderUtil
 
@@ -66,10 +69,11 @@ class CarbonScanRDD[V: ClassTag](
     columnProjection: Seq[Attribute],
     filterExpression: Expression,
     identifier: AbsoluteTableIdentifier,
-    @transient carbonTable: CarbonTable)
-    extends RDD[V](sc, Nil)
-        with CarbonHadoopMapReduceUtil
-        with Logging {
+    @transient carbonTable: CarbonTable,
+    segmentId: Option[String] = None)
+  extends RDD[V](sc, Nil)
+    with CarbonHadoopMapReduceUtil
+    with Logging {
 
   private val queryId = sparkContext.getConf.get("queryId", System.nanoTime() + "")
   private val jobTrackerId: String = {
@@ -86,7 +90,11 @@ class CarbonScanRDD[V: ClassTag](
 
     // initialise query_id for job
     job.getConfiguration.set("query.id", queryId)
-
+    // check whether query for loading into aggregate table per segment.
+    if (segmentId.nonEmpty) {
+      job.getConfiguration.set(
+        CarbonCommonConstants.AGGREGATE_SEGMENT_ID, segmentId.get)
+    }
     // get splits
     val splits = format.getSplits(job)
     val result = distributeSplits(splits)

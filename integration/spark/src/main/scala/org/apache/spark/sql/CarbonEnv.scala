@@ -18,6 +18,12 @@
 package org.apache.spark.sql
 
 import org.apache.spark.sql.hive.CarbonMetastore
+import org.apache.spark.SparkContext
+import org.apache.spark.scheduler.cluster.CoarseGrainedSchedulerBackend
+import org.apache.spark.sql.hive.{CarbonMetastoreCatalog, HiveContext}
+import org.apache.spark.sql.optimizer.CarbonAggTableOptimizer
+
+import org.apache.carbondata.common.logging.LogServiceFactory
 
 /**
  * Carbon Environment for unified context
@@ -36,6 +42,13 @@ object CarbonEnv {
       val catalog = new CarbonMetastore(cc, cc.storePath, cc.hiveClientInterface, "")
       carbonEnv = CarbonEnv(catalog)
       initialized = true
+
+  def getInstance(sqlContext: SQLContext): CarbonEnv = {
+    if (carbonEnv == null) {
+      carbonEnv =
+        CarbonEnv(sqlContext.asInstanceOf[CarbonContext],
+          sqlContext.asInstanceOf[CarbonContext].catalog)
+      CarbonAggTableOptimizer.init(sqlContext)
     }
   }
 

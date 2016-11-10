@@ -51,9 +51,12 @@ import org.apache.carbondata.core.carbon.CarbonDataLoadSchema;
 import org.apache.carbondata.core.carbon.CarbonTableIdentifier;
 import org.apache.carbondata.core.carbon.ColumnIdentifier;
 import org.apache.carbondata.core.carbon.datastore.block.Distributable;
+import org.apache.carbondata.core.carbon.datastore.block.SegmentProperties;
 import org.apache.carbondata.core.carbon.metadata.CarbonMetadata;
 import org.apache.carbondata.core.carbon.metadata.datatype.DataType;
 import org.apache.carbondata.core.carbon.metadata.schema.table.CarbonTable;
+import org.apache.carbondata.core.carbon.metadata.schema.table.column.CarbonDimension;
+import org.apache.carbondata.core.carbon.metadata.schema.table.column.ColumnSchema;
 import org.apache.carbondata.core.carbon.path.CarbonStorePath;
 import org.apache.carbondata.core.carbon.path.CarbonTablePath;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
@@ -61,6 +64,7 @@ import org.apache.carbondata.core.datastorage.store.filesystem.CarbonFile;
 import org.apache.carbondata.core.datastorage.store.filesystem.CarbonFileFilter;
 import org.apache.carbondata.core.datastorage.store.impl.FileFactory;
 import org.apache.carbondata.core.datastorage.store.impl.FileFactory.FileType;
+import org.apache.carbondata.core.keygenerator.KeyGenException;
 import org.apache.carbondata.core.load.LoadMetadataDetails;
 import org.apache.carbondata.core.util.CarbonProperties;
 import org.apache.carbondata.core.util.CarbonUtil;
@@ -75,16 +79,20 @@ import org.apache.carbondata.processing.api.dataloader.SchemaInfo;
 import org.apache.carbondata.processing.csvload.DataGraphExecuter;
 import org.apache.carbondata.processing.dataprocessor.DataProcessTaskStatus;
 import org.apache.carbondata.processing.dataprocessor.IDataProcessStatus;
+import org.apache.carbondata.processing.datatypes.GenericDataType;
 import org.apache.carbondata.processing.graphgenerator.GraphGenerator;
 import org.apache.carbondata.processing.graphgenerator.GraphGeneratorException;
 import org.apache.carbondata.processing.model.CarbonLoadModel;
+import org.apache.carbondata.processing.store.CarbonFactDataHandlerModel;
 import org.apache.carbondata.processing.util.CarbonDataProcessorUtil;
+import org.apache.carbondata.processing.util.RemoveDictionaryUtil;
 import org.apache.carbondata.spark.merger.NodeBlockRelation;
 import org.apache.carbondata.spark.merger.NodeMultiBlockRelation;
 
 import com.google.gson.Gson;
 import org.apache.spark.SparkConf;
 import org.apache.spark.util.Utils;
+import org.pentaho.di.core.exception.KettleException;
 
 
 public final class CarbonLoaderUtil {
@@ -515,6 +523,85 @@ public final class CarbonLoaderUtil {
     return getDictionary(
         new DictionaryColumnUniqueIdentifier(tableIdentifier, columnIdentifier, dataType),
         carbonStorePath);
+  }
+
+  public static CarbonFactDataHandlerModel getCarbonFactDataHandlerModel(
+      CarbonLoadModel carbonLoadModel,
+      SegmentProperties segmentProperties, String databaseName,
+      String tableName, String tempStoreLocation, String factStorelocation, char[] aggTypes) {
+    CarbonFactDataHandlerModel carbonFactDataHandlerModel = new CarbonFactDataHandlerModel();
+    carbonFactDataHandlerModel.setDatabaseName(databaseName);
+    carbonFactDataHandlerModel.setTableName(tableName);
+    carbonFactDataHandlerModel.setMeasureCount(segmentProperties.getMeasures().size());
+    carbonFactDataHandlerModel.setMdKeyLength(
+        segmentProperties.getDimensionKeyGenerator().getKeySizeInBytes());
+    carbonFactDataHandlerModel.setStoreLocation(tempStoreLocation);
+    carbonFactDataHandlerModel.setDimLens(segmentProperties.getDimColumnsCardinality());
+    carbonFactDataHandlerModel.setSegmentProperties(segmentProperties);
+    carbonFactDataHandlerModel.setNoDictionaryCount(
+        segmentProperties.getNumberOfNoDictionaryDimension());
+    carbonFactDataHandlerModel.setDimensionCount(segmentProperties.getDimensions().size() -
+            carbonFactDataHandlerModel.getNoDictionaryCount());
+    CarbonTable carbonTable = CarbonMetadata.getInstance().getCarbonTable(databaseName +
+            CarbonCommonConstants.UNDERSCORE + tableName);
+    List<ColumnSchema> wrapperColumnSchema = CarbonUtil.getColumnSchemaList(carbonTable
+            .getDimensionByTableName(tableName), carbonTable.getMeasureByTableName(tableName));
+    carbonFactDataHandlerModel.setWrapperColumnSchema(wrapperColumnSchema);
+    Map<Integer, GenericDataType> complexIndexMap =
+            new HashMap<>(segmentProperties.getComplexDimensions().size());
+    carbonFactDataHandlerModel.setComplexIndexMap(complexIndexMap);
+    carbonFactDataHandlerModel.setDataWritingRequest(true);
+    carbonFactDataHandlerModel.setAggType(aggTypes);
+    carbonFactDataHandlerModel.setFactDimLens(segmentProperties.getDimColumnsCardinality());
+    checkAndCreateCarbonDataLocation(factStorelocation, databaseName, tableName,
+        carbonLoadModel.getSegmentId());
+    List<CarbonDimension> dimensions = carbonTable.getDimensionByTableName(tableName);
+    boolean[] isuseInvertedIndex = new boolean[dimensions.size()];
+    int index = 0;
+    for (CarbonDimension dimension: dimensions) {
+      isuseInvertedIndex[index++] = dimension.isUseInvertedIndex();
+    }
+    carbonFactDataHandlerModel.setIsUseInvertedIndex(isuseInvertedIndex);
+    return carbonFactDataHandlerModel;
+  }
+
+  public static Object[] process(Object[] row, int noDictDimCount, int complexCount,
+       int measureCount, char[] aggType, SegmentProperties segmentProperties)
+          throws KettleException {
+    Object[] outputRow = null;
+    // adding one for the high cardinality dims byte array.
+    if (noDictDimCount > 0 || complexCount > 0) {
+      outputRow = new Object[measureCount + 1 + 1];
+    } else {
+      outputRow = new Object[measureCount + 1];
+    }
+
+    int l = 0;
+    int index = 0;
+    for (int i = 0; i < measureCount; i++) {
+      if (aggType[i] == CarbonCommonConstants.BIG_DECIMAL_MEASURE) {
+        outputRow[l++] = RemoveDictionaryUtil.getMeasure(index++, row);
+      } else if (aggType[i] == CarbonCommonConstants.BIG_INT_MEASURE) {
+        outputRow[l++] = (Long) RemoveDictionaryUtil.getMeasure(index++, row);
+      } else {
+        outputRow[l++] = (Double) RemoveDictionaryUtil.getMeasure(index++, row);
+      }
+    }
+    outputRow[l] = RemoveDictionaryUtil.getByteArrayForNoDictionaryCols(row);
+
+    int[] highCardExcludedRows = new int[segmentProperties.getDimColumnsCardinality().length];
+    for (int i = 0; i < highCardExcludedRows.length; i++) {
+      Object key = RemoveDictionaryUtil.getDimension(i, row);
+      highCardExcludedRows[i] = (Integer) key;
+    }
+    try {
+      outputRow[outputRow.length - 1] = segmentProperties
+              .getDimensionKeyGenerator().generateKey(highCardExcludedRows);
+    } catch (KeyGenException e) {
+      throw new KettleException("unable to generate the mdkey", e);
+    }
+
+    return outputRow;
   }
 
   /**

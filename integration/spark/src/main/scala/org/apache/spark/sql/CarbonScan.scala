@@ -39,6 +39,7 @@ case class CarbonScan(
     var columnProjection: Seq[Attribute],
     relationRaw: CarbonRelation,
     dimensionPredicatesRaw: Seq[Expression],
+    segmentId: Option[String] = None,
     useUnsafeCoversion: Boolean = true)(@transient val ocRaw: SQLContext) extends LeafNode {
   val carbonTable = relationRaw.metaData.carbonTable
   val selectedDims = scala.collection.mutable.MutableList[QueryDimension]()
@@ -136,13 +137,28 @@ case class CarbonScan(
     selectedMsrs.foreach(plan.addMeasure)
   }
 
+<<<<<<< ab71294d383f8c993c1c70289b0efb05b4b2612a
   def inputRdd: CarbonScanRDD[Array[Any]] = {
+=======
+  def inputRdd(segmentId: Option[String]): CarbonScanRDD[Array[Any]] = {
+    val conf = new Configuration()
+    val absoluteTableIdentifier = carbonTable.getAbsoluteTableIdentifier
+
+    // setting queryid
+    buildCarbonPlan.setQueryId(ocRaw.getConf("queryId", System.nanoTime() + ""))
+
+    val tableCreationTime = carbonCatalog
+        .getTableCreationTime(relationRaw.databaseName, relationRaw.tableName)
+    val schemaLastUpdatedTime = carbonCatalog
+        .getSchemaLastUpdatedTime(relationRaw.databaseName, relationRaw.tableName)
+>>>>>>> create agg table segment for every fact table single segment
     new CarbonScanRDD(
       ocRaw.sparkContext,
       columnProjection,
       buildCarbonPlan.getFilterExpression,
       carbonTable.getAbsoluteTableIdentifier,
-      carbonTable
+      carbonTable,
+      segmentId
     )
   }
 
@@ -151,7 +167,7 @@ case class CarbonScan(
 
   override def doExecute(): RDD[InternalRow] = {
     val outUnsafeRows: Boolean = (attributesNeedToDecode.size() == 0) && useUnsafeCoversion
-    inputRdd.mapPartitions { iter =>
+    inputRdd(segmentId).mapPartitions { iter =>
       val unsafeProjection = UnsafeProjection.create(output.map(_.dataType).toArray)
       new Iterator[InternalRow] {
         override def hasNext: Boolean = iter.hasNext

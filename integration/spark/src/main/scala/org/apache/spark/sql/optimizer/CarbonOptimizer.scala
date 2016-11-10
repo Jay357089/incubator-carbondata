@@ -76,7 +76,9 @@ class ResolveCarbonFunctions(relations: Seq[CarbonDecoderRelation])
       LOGGER.info("Starting to optimize plan")
       val recorder = CarbonTimeStatisticsFactory.createExecutorRecorder("")
       val queryStatistic = new QueryStatistic()
-      val result = transformCarbonPlan(plan, relations)
+      // handle for aggTable query
+      val aggTablePlan = CarbonAggTableOptimizer.apply(plan)
+      val result = transformCarbonPlan(aggTablePlan, relations)
       queryStatistic.addStatistics("Time taken for Carbon Optimizer to optimize: ",
         System.currentTimeMillis)
       recorder.recordStatistics(queryStatistic)
@@ -93,6 +95,24 @@ class ResolveCarbonFunctions(relations: Seq[CarbonDecoderRelation])
       case cd: CarbonDictionaryCatalystDecoder => true
       case other => false
     } isDefined
+  }
+
+  def isCreateAggTable(plan: LogicalPlan): Boolean = {
+    plan find {
+      case l: LogicalRelation if l.relation
+        .asInstanceOf[CarbonDatasourceRelation].segmentId.nonEmpty => true
+      case other => false
+    } isDefined
+  }
+
+  def getSegmentId(plan: LogicalPlan): Option[String] = {
+    var segmentId: Option[String] = None
+    plan foreach {
+      case add: AddSegmentId =>
+        segmentId = add.segmentId
+      case _ =>
+    }
+    segmentId
   }
 
   case class ExtraNodeInfo(var hasCarbonRelation: Boolean)
@@ -128,10 +148,24 @@ class ResolveCarbonFunctions(relations: Seq[CarbonDecoderRelation])
    * like dimension aggregate columns decoder under aggregator and join condition decoder under
    * join children.
    */
-  def transformCarbonPlan(plan: LogicalPlan,
+  def transformCarbonPlan(oldPlan: LogicalPlan,
       relations: Seq[CarbonDecoderRelation]): LogicalPlan = {
-    if (plan.isInstanceOf[RunnableCommand]) {
-      return plan
+    if (oldPlan.isInstanceOf[RunnableCommand]) {
+      return oldPlan
+    }
+    var plan: LogicalPlan = oldPlan
+    // for aggregation table, we need to keep in creating in every segment.
+    val segmentId = getSegmentId(oldPlan)
+    if (segmentId.nonEmpty) {
+      // first to get segment number, then transformUp
+      plan = oldPlan transform {
+        case add: AddSegmentId =>
+          add.child
+        case rl: LogicalRelation if rl.relation.isInstanceOf[CarbonDatasourceRelation] =>
+          rl.relation.asInstanceOf[CarbonDatasourceRelation].segmentId = segmentId
+          rl
+        case other => other
+      }
     }
     var decoder = false
     val mapOfNonCarbonPlanNodes = new java.util.HashMap[LogicalPlan, ExtraNodeInfo]
@@ -473,7 +507,23 @@ class ResolveCarbonFunctions(relations: Seq[CarbonDecoderRelation])
 
     val processor = new CarbonDecoderProcessor
     processor.updateDecoders(processor.getDecoderList(transFormedPlan))
-    updateProjection(updateTempDecoder(transFormedPlan, aliasMap, attrMap))
+    val optimizedPlan = updateProjection(updateTempDecoder(transFormedPlan, aliasMap, attrMap))
+    var newPlan = optimizedPlan
+    if (isCreateAggTable(optimizedPlan)) {
+      var isFirstDecoder = false
+      newPlan = optimizedPlan transform {
+        case decoder: CarbonDictionaryCatalystDecoder if !isFirstDecoder =>
+          isFirstDecoder = true
+          CarbonDictionaryCatalystIntType(
+            decoder.relations,
+            decoder.profile,
+            decoder.aliasMap,
+            decoder.isOuter,
+            decoder.child)
+        case other => other
+      }
+    }
+    newPlan
   }
 
   private def updateTempDecoder(plan: LogicalPlan,

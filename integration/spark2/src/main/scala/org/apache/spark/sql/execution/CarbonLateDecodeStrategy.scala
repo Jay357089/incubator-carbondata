@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.execution
 
-import org.apache.spark.sql.{CarbonDictionaryCatalystDecoder, CarbonDictionaryDecoder}
+import org.apache.spark.sql.{CarbonDictionaryCatalystDecoder, CarbonDictionaryCatalystIntType, CarbonDictionaryDecoder, CarbonDictionaryIntToString}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 
 /**
@@ -33,6 +33,11 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
           aliasMap,
           planLater(child)
         ) :: Nil
+      case CarbonDictionaryCatalystIntType(relations, profile, aliasMap, _, child) =>
+        CarbonDictionaryIntToString(relations,
+          profile,
+          aliasMap,
+          planLater(child)) :: Nil
       case _ => Nil
     }
   }

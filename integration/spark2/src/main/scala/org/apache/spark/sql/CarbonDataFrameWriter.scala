@@ -121,24 +121,10 @@ class CarbonDataFrameWriter(sqlContext: SQLContext, val dataFrame: DataFrame) {
 
   private def csvPackage: String = "com.databricks.spark.csv.newapi"
 
-  private def convertToCarbonType(sparkType: DataType): String = {
-    sparkType match {
-      case StringType => CarbonType.STRING.getName
-      case IntegerType => CarbonType.INT.getName
-      case ByteType => CarbonType.INT.getName
-      case ShortType => CarbonType.SHORT.getName
-      case LongType => CarbonType.LONG.getName
-      case FloatType => CarbonType.DOUBLE.getName
-      case DoubleType => CarbonType.DOUBLE.getName
-      case BooleanType => CarbonType.DOUBLE.getName
-      case TimestampType => CarbonType.TIMESTAMP.getName
-      case other => sys.error(s"unsupported type: $other")
-    }
-  }
 
   private def makeCreateTableString(schema: StructType, options: CarbonOption): String = {
     val carbonSchema = schema.map { field =>
-      s"${ field.name } ${ convertToCarbonType(field.dataType) }"
+      s"${ field.name } ${ CarbonDataFrameWriter.convertToCarbonType(field.dataType) }"
     }
     s"""
           CREATE TABLE IF NOT EXISTS ${options.dbName}.${options.tableName}
@@ -163,4 +149,21 @@ class CarbonDataFrameWriter(sqlContext: SQLContext, val dataFrame: DataFrame) {
     }
   }
 
+}
+
+object CarbonDataFrameWriter {
+  def convertToCarbonType(sparkType: DataType): String = {
+    sparkType match {
+      case StringType => CarbonType.STRING.getName
+      case IntegerType => CarbonType.INT.getName
+      case ByteType => CarbonType.INT.getName
+      case ShortType => CarbonType.SHORT.getName
+      case LongType => CarbonType.LONG.getName
+      case FloatType => CarbonType.DOUBLE.getName
+      case DoubleType => CarbonType.DOUBLE.getName
+      case BooleanType => CarbonType.DOUBLE.getName
+      case TimestampType => CarbonType.TIMESTAMP.getName
+      case other => sys.error(s"unsupported type: $other")
+    }
+  }
 }

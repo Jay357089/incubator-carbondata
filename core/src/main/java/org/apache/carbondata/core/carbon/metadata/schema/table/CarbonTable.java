@@ -91,6 +91,35 @@ public class CarbonTable implements Serializable {
    */
   private int blockSize;
 
+  public boolean isAggTable() {
+    return isAggTable;
+  }
+
+  public void setAggTable(TableInfo tableInfo) {
+    Map<String, String> tableProperties = tableInfo.getFactTable().getTableProperties();
+    if (tableProperties.get(CarbonCommonConstants.isAggTable) != null) {
+      isAggTable = true;
+    }
+  }
+
+  private boolean isAggTable;
+
+  public String getMainTableName() {
+    return mainTableName;
+  }
+
+  public void setMainTableName(TableInfo tableInfo) {
+    Map<String, String> tableProperties = tableInfo.getFactTable().getTableProperties();
+    this.mainTableName = tableProperties.get(CarbonCommonConstants.MAIN_TABLE_NAME);
+  }
+
+  private String mainTableName;
+
+  /**
+   * table block size in MB
+   */
+  private String querySqlOnFactTable;
+
   public CarbonTable() {
     this.tableDimensionsMap = new HashMap<String, List<CarbonDimension>>();
     this.tableMeasuresMap = new HashMap<String, List<CarbonMeasure>>();
@@ -105,6 +134,9 @@ public class CarbonTable implements Serializable {
     this.tableLastUpdatedTime = tableInfo.getLastUpdatedTime();
     this.tableUniqueName = tableInfo.getTableUniqueName();
     this.metaDataFilepath = tableInfo.getMetaDataFilepath();
+    setQuerySqlOnFactTable(tableInfo);
+    setAggTable(tableInfo);
+    setMainTableName(tableInfo);
     //setting unique table identifier
     CarbonTableIdentifier carbontableIdentifier =
         new CarbonTableIdentifier(tableInfo.getDatabaseName(),
@@ -438,4 +470,12 @@ public class CarbonTable implements Serializable {
     this.blockSize = blockSize;
   }
 
+  public String getQuerySqlOnFactTable() {
+    return querySqlOnFactTable;
+  }
+
+  public void setQuerySqlOnFactTable(TableInfo tableInfo) {
+    Map<String, String> tableProperties = tableInfo.getFactTable().getTableProperties();
+    this.querySqlOnFactTable = tableProperties.get(CarbonCommonConstants.QUERYSQL_ON_FACTTABLE);
+  }
 }

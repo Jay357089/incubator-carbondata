@@ -39,7 +39,8 @@ case class CarbonDatasourceHadoopRelation(
     sparkSession: SparkSession,
     paths: Array[String],
     parameters: Map[String, String],
-    tableSchema: Option[StructType])
+    tableSchema: Option[StructType],
+    var segmentId: Option[String] = None)
   extends BaseRelation with PrunedFilteredScan {
 
   lazy val absIdentifier = AbsoluteTableIdentifier.fromTablePath(paths.head)
@@ -71,7 +72,7 @@ case class CarbonDatasourceHadoopRelation(
     CarbonInputFormat.setCarbonReadSupport(classOf[SparkRowReadSupportImpl], conf)
 
     new CarbonScanRDD[Row](sqlContext.sparkContext, projection, filterExpression.orNull,
-      absIdentifier, carbonTable)
+      absIdentifier, carbonTable, segmentId)
   }
 
 }

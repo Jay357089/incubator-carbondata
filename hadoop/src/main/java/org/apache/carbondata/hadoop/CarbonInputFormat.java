@@ -198,15 +198,20 @@ public class CarbonInputFormat<T> extends FileInputFormat<Void, T> {
     AbsoluteTableIdentifier identifier = getAbsoluteTableIdentifier(job.getConfiguration());
     List<String> invalidSegments = new ArrayList<>();
 
-    // get all valid segments and set them into the configuration
-    if (getSegmentsToAccess(job).length == 0) {
+    // check whether query for aggregate table
+    String aggSegmentId = job.getConfiguration().get(CarbonCommonConstants.AGGREGATE_SEGMENT_ID);
+    if (aggSegmentId != null) {
+      List<String> segmentId = new ArrayList<>();
+      segmentId.add(aggSegmentId);
+      setSegmentsToAccess(job.getConfiguration(), segmentId);
+    } else if (getSegmentsToAccess(job).length == 0) {
+      // get all valid segments and set them into the configuration
       SegmentStatusManager.SegmentStatus segments =
           SegmentStatusManager.getSegmentStatus(identifier);
       setSegmentsToAccess(job.getConfiguration(), segments.getValidSegments());
       if (segments.getValidSegments().size() == 0) {
         return new ArrayList<>(0);
       }
-
       // remove entry in the segment index if there are invalid segments
       invalidSegments.addAll(segments.getInvalidSegments());
       if (invalidSegments.size() > 0) {

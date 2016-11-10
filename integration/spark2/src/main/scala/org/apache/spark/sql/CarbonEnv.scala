@@ -22,6 +22,7 @@ import org.apache.spark.SparkContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler.cluster.CoarseGrainedSchedulerBackend
 import org.apache.spark.sql.hive.CarbonMetastore
+import org.apache.spark.sql.optimizer.CarbonAggTableOptimizer
 
 /**
  * Carbon Environment for unified context
@@ -41,6 +42,8 @@ object CarbonEnv extends Logging {
         new CarbonMetastore(sqlContext.sparkSession.conf, storePath)
       }
       carbonEnv = CarbonEnv(catalog)
+      // initia for aggtable
+      CarbonAggTableOptimizer.init(sqlContext)
       initialized = true
     }
   }

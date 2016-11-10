@@ -18,6 +18,7 @@
 package org.apache.carbondata.spark
 
 import org.apache.hadoop.fs.Path
+import org.apache.spark.Logging
 import org.apache.spark.sql._
 import org.apache.spark.sql.execution.command.LoadTable
 import org.apache.spark.sql.types._
@@ -136,27 +137,18 @@ class CarbonDataFrameWriter(val dataFrame: DataFrame) {
 
   private def csvPackage: String = "com.databricks.spark.csv.newapi"
 
-  private def convertToCarbonType(sparkType: DataType): String = {
-    sparkType match {
-      case StringType => CarbonType.STRING.getName
-      case IntegerType => CarbonType.INT.getName
-      case ByteType => CarbonType.INT.getName
-      case ShortType => CarbonType.SHORT.getName
-      case LongType => CarbonType.LONG.getName
-      case FloatType => CarbonType.DOUBLE.getName
-      case DoubleType => CarbonType.DOUBLE.getName
-      case BooleanType => CarbonType.DOUBLE.getName
-      case TimestampType => CarbonType.TIMESTAMP.getName
-      case other => sys.error(s"unsupported type: $other")
-    }
-  }
-
   private def makeCreateTableString(schema: StructType, options: CarbonOption): String = {
     val carbonSchema = schema.map { field =>
-      s"${ field.name } ${ convertToCarbonType(field.dataType) }"
+      s"${ field.name } ${ CarbonDataFrameWriter.convertToCarbonType(field.dataType) }"
     }
+    val ifNotExists =
+      if (options.allowExisting.toBoolean) {
+        "IF NOT EXISTS"
+      } else {
+        ""
+      }
     s"""
-          CREATE TABLE IF NOT EXISTS ${options.dbName}.${options.tableName}
+          CREATE TABLE $ifNotExists ${options.dbName}.${options.tableName}
           (${ carbonSchema.mkString(", ") })
           STORED BY '${ CarbonContext.datasourceName }'
       """
@@ -178,4 +170,21 @@ class CarbonDataFrameWriter(val dataFrame: DataFrame) {
     }
   }
 
+}
+
+object CarbonDataFrameWriter extends Logging {
+  def convertToCarbonType(sparkType: DataType): String = {
+    sparkType match {
+      case StringType => CarbonType.STRING.getName
+      case IntegerType => CarbonType.INT.getName
+      case ByteType => CarbonType.INT.getName
+      case ShortType => CarbonType.SHORT.getName
+      case LongType => CarbonType.LONG.getName
+      case FloatType => CarbonType.DOUBLE.getName
+      case DoubleType => CarbonType.DOUBLE.getName
+      case BooleanType => CarbonType.DOUBLE.getName
+      case TimestampType => CarbonType.TIMESTAMP.getName
+      case other => sys.error(s"unsupported type: $other")
+    }
+  }
 }

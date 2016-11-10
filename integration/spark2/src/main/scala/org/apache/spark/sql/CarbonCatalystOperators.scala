@@ -37,6 +37,12 @@ case class Top(count: Int, topOrBottom: Int, dim: NamedExpression, msr: NamedExp
   }
 }
 
+case class AddSegmentId(
+                         segmentId: Option[String],
+                         child: LogicalPlan) extends UnaryNode {
+  override def output: Seq[Attribute] = child.output
+}
+
 /**
  * Shows Loads in a table
  */
@@ -70,6 +76,16 @@ case class CarbonDictionaryCatalystDecoder(
     aliasMap: CarbonAliasDecoderRelation,
     isOuter: Boolean,
     child: LogicalPlan) extends UnaryNode {
+  override def output: Seq[Attribute] = child.output
+}
+
+case class CarbonDictionaryCatalystIntType(
+                                            relations: Seq[CarbonDecoderRelation],
+                                            profile: CarbonProfile,
+                                            aliasMap: CarbonAliasDecoderRelation,
+                                            isOuter: Boolean,
+                                            child: LogicalPlan)
+  extends UnaryNode {
   override def output: Seq[Attribute] = child.output
 }
 

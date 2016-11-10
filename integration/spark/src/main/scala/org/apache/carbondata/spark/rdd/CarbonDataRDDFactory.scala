@@ -164,6 +164,30 @@ object CarbonDataRDDFactory {
     }
   }
 
+  def configSplitMaxSize(context: SparkContext, filePaths: String,
+      hadoopConfiguration: Configuration): Unit = {
+    val defaultParallelism = if (context.defaultParallelism < 1) {
+      1
+    } else {
+      context.defaultParallelism
+    }
+    val spaceConsumed = FileUtils.getSpaceOccupied(filePaths)
+    val blockSize =
+      hadoopConfiguration.getLongBytes("dfs.blocksize", CarbonCommonConstants.CARBON_256MB)
+    LOGGER.info("[Block Distribution]")
+    // calculate new block size to allow use all the parallelism
+    if (spaceConsumed < defaultParallelism * blockSize) {
+      var newSplitSize: Long = spaceConsumed / defaultParallelism
+      if (newSplitSize < CarbonCommonConstants.CARBON_16MB) {
+        newSplitSize = CarbonCommonConstants.CARBON_16MB
+      }
+      hadoopConfiguration.set(FileInputFormat.SPLIT_MAXSIZE, newSplitSize.toString)
+      LOGGER.info(s"totalInputSpaceConsumed: $spaceConsumed , " +
+                  s"defaultParallelism: $defaultParallelism")
+      LOGGER.info(s"mapreduce.input.fileinputformat.split.maxsize: ${ newSplitSize.toString }")
+    }
+  }
+
   def alterTableForCompaction(sqlContext: SQLContext,
       alterTableModel: AlterTableModel,
       carbonLoadModel: CarbonLoadModel,

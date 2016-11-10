@@ -23,7 +23,7 @@ import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.util.TableLoader
 
-object CarbonExample {
+object testExample {
 
   def main(args: Array[String]): Unit = {
     val rootPath = "E:/carbondata"
@@ -38,32 +38,33 @@ object CarbonExample {
       .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
 
+    //    val spark = SparkSession.builder.config(sc.getConf).enableHiveSupport().getOrCreate()
     // Drop table
     spark.sql("DROP TABLE IF EXISTS carbon_table")
     spark.sql("DROP TABLE IF EXISTS csv_table")
 
     // Create table
-//    spark.sql(
-//      s"""
-//         | CREATE TABLE carbon_table(
-//         |    shortField short,
-//         |    intField int,
-//         |    bigintField long,
-//         |    doubleField double,
-//         |    stringField string
-//         | )
-//         | USING org.apache.spark.sql.CarbonSource
-//       """.stripMargin)
-//
-    spark.sql(s"CREATE TABLE IF NOT EXISTS dwcjk (CJRQ String, CJXH string, " +
+    //    spark.sql(
+    //      s"""
+    //         | CREATE TABLE carbon_table(
+    //         |    shortField short,
+    //         |    intField int,
+    //         |    bigintField long,
+    //         |    doubleField double,
+    //         |    stringField string
+    //         | )
+    //         | USING org.apache.spark.sql.CarbonSource
+    //       """.stripMargin)
+
+    spark.sql(s"CREATE TABLE dwcjk (CJRQ String, CJXH string, " +
       s"ZQDH String, BXWDH String, BGDDM String, BHTXH String, BRZRQ String, " +
       s"BPCBZ String, SXWDH String, SGDDM String, SHTXH String, SRZRQ String, SPCBZ String, CJGS int, " +
       s"CJJG double, CJSJ int, YWLB String, MMLB String, FBBZ String, FILLER String) " +
-      s"USING org.apache.spark.sql.CarbonSource ")
-//    spark.sql(s"create table dwcjk_agg USING org.apache.spark.sql.CarbonSource" +
-//      s" as select cjrq, cjsj, zqdh, bhtxh as ybdm, bxwdh as jydy, bgddm as gddm, mmlb, " +
-//      s"sum(cjgs) as cjgs, sum(cjgs*cjjg) as cjje " +
-//      s"from dwcjk where mmlb<>'c' group by cjrq, cjsj, zqdh, bxwdh, bgddm, bhtxh, mmlb ")
+      s"USING org.apache.spark.sql.CarbonSource Options('DICTIONARY_INCLUDE'='CJSJ')")
+    //    spark.sql(s"create table dwcjk_agg USING org.apache.spark.sql.CarbonSource" +
+    //      s" as select cjrq, cjsj, zqdh, bhtxh as ybdm, bxwdh as jydy, bgddm as gddm, mmlb, " +
+    //      s"sum(cjgs) as cjgs, sum(cjgs*cjjg) as cjje " +
+    //      s"from dwcjk where mmlb<>'c' group by cjrq, cjsj, zqdh, bxwdh, bgddm, bhtxh, mmlb ")
 
 
     val prop = s"$rootPath/conf/dataload.properties.template"
@@ -73,7 +74,7 @@ object CarbonExample {
     TableLoader.main(Array[String](prop, tableName, dwcjk))
 
 
-//    spark.sql("desc formatted dwcjk").show()
+    //    spark.sql("desc formatted dwcjk").show()
     //    spark.sql(
     //      s"""
     //         | CREATE TABLE csv_table
