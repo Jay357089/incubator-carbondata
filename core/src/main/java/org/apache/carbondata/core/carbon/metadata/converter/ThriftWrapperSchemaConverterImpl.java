@@ -28,6 +28,9 @@ import org.apache.carbondata.core.carbon.metadata.schema.SchemaEvolutionEntry;
 import org.apache.carbondata.core.carbon.metadata.schema.table.TableInfo;
 import org.apache.carbondata.core.carbon.metadata.schema.table.TableSchema;
 import org.apache.carbondata.core.carbon.metadata.schema.table.column.ColumnSchema;
+import org.apache.carbondata.core.constants.CarbonCommonConstants;
+
+import static org.apache.carbondata.core.constants.CarbonCommonConstants.AGG_TABLE_FLAG;
 
 /**
  * Thrift schema to carbon schema converter and vice versa
@@ -381,9 +384,12 @@ public class ThriftWrapperSchemaConverterImpl implements SchemaConverter {
     int index = 0;
     for (org.apache.carbondata.format.TableSchema aggTable : externalTableInfo
         .getAggregate_table_list()) {
-      aggTablesList.add(fromExternalToWrapperTableSchema(aggTable, "agg_table_" + index));
+      aggTablesList.add(fromExternalToWrapperTableSchema(aggTable, tableName +
+          CarbonCommonConstants.UNDERSCORE + AGG_TABLE_FLAG +
+          CarbonCommonConstants.UNDERSCORE + index));
       index++;
     }
+    wrapperTableInfo.setAggregateTableList(aggTablesList);
     return wrapperTableInfo;
   }
 

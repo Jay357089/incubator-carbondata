@@ -397,10 +397,12 @@ public class CarbonTablePath extends Path {
      */
     public static String getSegmentId(String dataFileAbsolutePath) {
       // find segment id from last of data file path
-      int endIndex = dataFileAbsolutePath.lastIndexOf(CarbonCommonConstants.FILE_SEPARATOR);
+      String unifieddataFilePath = dataFileAbsolutePath.replace(
+              CarbonCommonConstants.WINDOWS_FILE_SEPARATOR, CarbonCommonConstants.FILE_SEPARATOR);
+      int endIndex = unifieddataFilePath.lastIndexOf(CarbonCommonConstants.FILE_SEPARATOR);
       // + 1 for size of "/"
       int startIndex =
-          dataFileAbsolutePath.lastIndexOf(CarbonCommonConstants.FILE_SEPARATOR, endIndex - 1) + 1;
+          unifieddataFilePath.lastIndexOf(CarbonCommonConstants.FILE_SEPARATOR, endIndex - 1) + 1;
       String segmentDirStr = dataFileAbsolutePath.substring(startIndex, endIndex);
       //identify id in segment_<id>
       String[] segmentDirSplits = segmentDirStr.split("_");

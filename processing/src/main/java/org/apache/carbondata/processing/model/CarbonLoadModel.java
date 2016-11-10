@@ -134,6 +134,11 @@ public class CarbonLoadModel implements Serializable {
   private String rddIteratorKey;
 
   /**
+   * kettle Home path
+   */
+  private String kettleHomePath;
+
+  /**
    * get escape char
    * @return
    */
@@ -321,6 +326,14 @@ public class CarbonLoadModel implements Serializable {
    */
   public void setDimFolderPath(String dimFolderPath) {
     this.dimFolderPath = dimFolderPath;
+  }
+
+  public String getKettleHomePath() {
+    return kettleHomePath;
+  }
+
+  public void setKettleHomePath(String kettleHomePath) {
+    this.kettleHomePath = kettleHomePath;
   }
 
   /**
