@@ -43,7 +43,7 @@ class CarbonDataFrameWriter(val dataFrame: DataFrame) extends Logging {
     writeToCarbonFile(parameters)
   }
 
-  private def writeToCarbonFile(parameters: Map[String, String] = Map()): Unit = {
+  def writeToCarbonFile(parameters: Map[String, String] = Map()): Unit = {
     val options = new CarbonOption(parameters)
     val cc = CarbonContext.getInstance(dataFrame.sqlContext.sparkContext)
     if (options.tempCSV) {
@@ -134,27 +134,18 @@ class CarbonDataFrameWriter(val dataFrame: DataFrame) extends Logging {
 
   private def csvPackage: String = "com.databricks.spark.csv.newapi"
 
-  private def convertToCarbonType(sparkType: DataType): String = {
-    sparkType match {
-      case StringType => CarbonType.STRING.getName
-      case IntegerType => CarbonType.INT.getName
-      case ByteType => CarbonType.INT.getName
-      case ShortType => CarbonType.SHORT.getName
-      case LongType => CarbonType.LONG.getName
-      case FloatType => CarbonType.DOUBLE.getName
-      case DoubleType => CarbonType.DOUBLE.getName
-      case BooleanType => CarbonType.DOUBLE.getName
-      case TimestampType => CarbonType.TIMESTAMP.getName
-      case other => sys.error(s"unsupported type: $other")
-    }
-  }
-
   private def makeCreateTableString(schema: StructType, options: CarbonOption): String = {
     val carbonSchema = schema.map { field =>
-      s"${ field.name } ${ convertToCarbonType(field.dataType) }"
+      s"${ field.name } ${ CarbonDataFrameWriter.convertToCarbonType(field.dataType) }"
     }
+    val ifNotExists =
+      if (options.allowExisting.toBoolean) {
+        "IF NOT EXISTS"
+      } else {
+        ""
+      }
     s"""
-          CREATE TABLE IF NOT EXISTS ${options.dbName}.${options.tableName}
+          CREATE TABLE $ifNotExists ${options.dbName}.${options.tableName}
           (${ carbonSchema.mkString(", ") })
           STORED BY '${ CarbonContext.datasourceName }'
       """
@@ -176,4 +167,21 @@ class CarbonDataFrameWriter(val dataFrame: DataFrame) extends Logging {
     }
   }
 
+}
+
+object CarbonDataFrameWriter extends Logging {
+  def convertToCarbonType(sparkType: DataType): String = {
+    sparkType match {
+      case StringType => CarbonType.STRING.getName
+      case IntegerType => CarbonType.INT.getName
+      case ByteType => CarbonType.INT.getName
+      case ShortType => CarbonType.SHORT.getName
+      case LongType => CarbonType.LONG.getName
+      case FloatType => CarbonType.DOUBLE.getName
+      case DoubleType => CarbonType.DOUBLE.getName
+      case BooleanType => CarbonType.DOUBLE.getName
+      case TimestampType => CarbonType.TIMESTAMP.getName
+      case other => sys.error(s"unsupported type: $other")
+    }
+  }
 }

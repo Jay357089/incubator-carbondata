@@ -23,7 +23,6 @@ import scala.collection.JavaConverters._
 import scala.reflect.ClassTag
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.mapreduce.InputSplit
 import org.apache.hadoop.mapreduce.Job
 import org.apache.spark.{Logging, Partition, SparkContext, TaskContext}
 import org.apache.spark.rdd.RDD
@@ -38,7 +37,6 @@ import org.apache.carbondata.core.carbon.querystatistics.{QueryStatistic, QueryS
 import org.apache.carbondata.core.util.CarbonTimeStatisticsFactory
 import org.apache.carbondata.hadoop.{CarbonInputFormat, CarbonInputSplit}
 import org.apache.carbondata.lcm.status.SegmentStatusManager
-import org.apache.carbondata.scan.executor.QueryExecutor
 import org.apache.carbondata.scan.executor.QueryExecutorFactory
 import org.apache.carbondata.scan.expression.Expression
 import org.apache.carbondata.scan.model.QueryModel
@@ -75,7 +73,8 @@ class CarbonScanRDD[V: ClassTag](
     @transient conf: Configuration,
     tableCreationTime: Long,
     schemaLastUpdatedTime: Long,
-    baseStoreLocation: String)
+    baseStoreLocation: String,
+    segmentId: Option[String] = None)
   extends RDD[V](sc, Nil) with Logging {
 
 
@@ -90,22 +89,32 @@ class CarbonScanRDD[V: ClassTag](
 
     val result = new util.ArrayList[Partition](defaultParallelism)
     val LOGGER = LogServiceFactory.getLogService(this.getClass.getName)
-    val validAndInvalidSegments = new SegmentStatusManager(queryModel.getAbsoluteTableIdentifier)
-      .getValidAndInvalidSegments
+    // get valid and invalid segments,
+    // need to distinguish query on fact table from creating aggregation table.
+    var validSegments = List[String]()
+    var inValidSegments = List[String]()
+    if (segmentId.nonEmpty) {
+      validSegments = List(segmentId.get)
+    } else {
+      val validAndInvalidSegments = new SegmentStatusManager(queryModel.getAbsoluteTableIdentifier)
+        .getValidAndInvalidSegments
+      validSegments = validAndInvalidSegments.getValidSegments.asScala.toList
+      inValidSegments = validAndInvalidSegments.getInvalidSegments.asScala.toList
+    }
     // set filter resolver tree
     try {
       // before applying filter check whether segments are available in the table.
-      if (!validAndInvalidSegments.getValidSegments.isEmpty) {
+      if (!validSegments.isEmpty) {
         val filterResolver = carbonInputFormat
           .getResolvedFilter(job.getConfiguration, filterExpression)
         CarbonInputFormat.setFilterPredicates(job.getConfiguration, filterResolver)
         queryModel.setFilterExpressionResolverTree(filterResolver)
         CarbonInputFormat
           .setSegmentsToAccess(job.getConfiguration,
-            validAndInvalidSegments.getValidSegments
+            validSegments.asJava
           )
         SegmentTaskIndexStore.getInstance()
-          .removeTableBlocks(validAndInvalidSegments.getInvalidSegments,
+          .removeTableBlocks(inValidSegments.asJava,
             queryModel.getAbsoluteTableIdentifier
           )
       }
@@ -118,7 +127,7 @@ class CarbonScanRDD[V: ClassTag](
     val splits = carbonInputFormat.getSplits(job)
     if (!splits.isEmpty) {
       val carbonInputSplits = splits.asScala.map(_.asInstanceOf[CarbonInputSplit])
-      queryModel.setInvalidSegmentIds(validAndInvalidSegments.getInvalidSegments)
+      queryModel.setInvalidSegmentIds(inValidSegments.asJava)
       val blockListTemp = carbonInputSplits.map(inputSplit =>
         new TableBlockInfo(inputSplit.getPath.toString,
           inputSplit.getStart, inputSplit.getSegmentId,

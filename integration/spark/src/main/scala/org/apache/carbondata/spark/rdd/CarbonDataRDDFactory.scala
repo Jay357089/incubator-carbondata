@@ -32,8 +32,7 @@ import org.apache.hadoop.mapreduce.Job
 import org.apache.hadoop.mapreduce.lib.input.{FileInputFormat, FileSplit}
 import org.apache.spark.{util => _, _}
 import org.apache.spark.sql.{CarbonEnv, DataFrame, SQLContext}
-import org.apache.spark.sql.execution.command.{AlterTableModel, CompactionCallableModel,
-CompactionModel, Partitioner}
+import org.apache.spark.sql.execution.command.{AlterTableModel, CompactionCallableModel, CompactionModel, Partitioner}
 import org.apache.spark.sql.hive.DistributionUtil
 import org.apache.spark.util.{FileUtils, SplitUtils}
 
@@ -179,6 +178,7 @@ object CarbonDataRDDFactory extends Logging {
                 "Empty store or Invalid column type, For more details please refer logs.")
     }
   }
+
 
   def configSplitMaxSize(context: SparkContext, filePaths: String,
       hadoopConfiguration: Configuration): Unit = {

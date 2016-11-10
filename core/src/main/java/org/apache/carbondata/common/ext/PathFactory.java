@@ -19,8 +19,11 @@
 package org.apache.carbondata.common.ext;
 
 import org.apache.carbondata.core.carbon.CarbonTableIdentifier;
+import org.apache.carbondata.core.carbon.metadata.CarbonMetadata;
+import org.apache.carbondata.core.carbon.metadata.schema.table.CarbonTable;
 import org.apache.carbondata.core.carbon.path.CarbonStorePath;
 import org.apache.carbondata.core.carbon.path.CarbonTablePath;
+import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.service.PathService;
 
 /**
@@ -35,9 +38,28 @@ public class PathFactory implements PathService {
    * @param tableIdentifier
    * @return store path related to tables
    */
-  @Override public CarbonTablePath getCarbonTablePath(
-      String storeLocation, CarbonTableIdentifier tableIdentifier) {
-    return CarbonStorePath.getCarbonTablePath(storeLocation, tableIdentifier);
+  @Override public CarbonTablePath getCarbonTablePath(String storeLocation,
+            CarbonTableIdentifier tableIdentifier) {
+    return CarbonStorePath.getCarbonTablePath(storeLocation,
+            getMainTableIdentifierInCaseOfAggTable(tableIdentifier));
+  }
+
+  /**
+   *  add to identify aggregate table's main table, the can get dictionary file.
+   * @param tableIdentifier
+   * @return
+     */
+  private CarbonTableIdentifier getMainTableIdentifierInCaseOfAggTable(
+          CarbonTableIdentifier tableIdentifier) {
+    CarbonTable carbonTable = CarbonMetadata.getInstance().getCarbonTable(
+            tableIdentifier.getTableUniqueName());
+    if (carbonTable.isAggTable()) {
+      CarbonTable mainTable = CarbonMetadata.getInstance().getCarbonTable(
+              tableIdentifier.getDatabaseName() + CarbonCommonConstants.UNDERSCORE +
+                      carbonTable.getMainTableName());
+      tableIdentifier = mainTable.getCarbonTableIdentifier();
+    }
+    return tableIdentifier;
   }
 
   public static PathService getInstance() {

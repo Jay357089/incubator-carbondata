@@ -83,6 +83,22 @@ case class CarbonDictionaryCatalystDecoder(
   override def output: Seq[Attribute] = child.output
 }
 
+case class CarbonDictionaryCatalystIntType(
+    relations: Seq[CarbonDecoderRelation],
+    profile: CarbonProfile,
+    aliasMap: CarbonAliasDecoderRelation,
+    isOuter: Boolean,
+    child: LogicalPlan)
+  extends UnaryNode {
+  override def output: Seq[Attribute] = child.output
+}
+
+case class AddSegmentId(
+    segmentId: Option[String],
+    child: LogicalPlan) extends UnaryNode {
+  override def output: Seq[Attribute] = child.output
+}
+
 abstract class CarbonProfile(attributes: Seq[Attribute]) extends Serializable {
   def isEmpty: Boolean = attributes.isEmpty
 }

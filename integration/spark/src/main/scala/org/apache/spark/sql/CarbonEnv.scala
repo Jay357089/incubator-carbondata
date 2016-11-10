@@ -18,6 +18,7 @@
 package org.apache.spark.sql
 
 import org.apache.spark.sql.hive.{CarbonMetastoreCatalog, HiveContext}
+import org.apache.spark.sql.optimizer.CarbonAggTableOptimizer
 
 /**
  * Carbon Environment for unified context
@@ -33,6 +34,7 @@ object CarbonEnv {
       carbonEnv =
         CarbonEnv(sqlContext.asInstanceOf[CarbonContext],
           sqlContext.asInstanceOf[CarbonContext].catalog)
+      CarbonAggTableOptimizer.init(sqlContext)
     }
     carbonEnv
   }
