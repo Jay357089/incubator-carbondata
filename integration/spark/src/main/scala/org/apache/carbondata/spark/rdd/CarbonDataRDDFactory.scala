@@ -164,6 +164,7 @@ object CarbonDataRDDFactory {
     }
   }
 
+
   def configSplitMaxSize(context: SparkContext, filePaths: String,
       hadoopConfiguration: Configuration): Unit = {
     val defaultParallelism = if (context.defaultParallelism < 1) {

@@ -40,7 +40,7 @@ import org.apache.spark.sql.hive.HiveQlWrapper
 import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.carbon.metadata.datatype.DataType
 import org.apache.carbondata.core.constants.CarbonCommonConstants
-import org.apache.carbondata.core.util.{CarbonProperties, DataTypeUtil}
+import org.apache.carbondata.core.util.DataTypeUtil
 import org.apache.carbondata.spark.exception.MalformedCarbonCommandException
 import org.apache.carbondata.spark.util.CommonUtil
 
@@ -284,13 +284,12 @@ class CarbonSqlParser() extends AbstractSparkSQLParser {
    */
   protected lazy val createTable: Parser[LogicalPlan] =
   restInput ^^ {
-
     case statement =>
       try {
         // DDl will be parsed and we get the AST tree from the HiveQl
         val node = HiveQlWrapper.getAst(statement)
         // processing the AST tree
-        nodeToPlan(node)
+        nodeToPlan(node, statement)
       } catch {
         // MalformedCarbonCommandException need to be throw directly, parser will catch it
         case ce: MalformedCarbonCommandException =>
@@ -314,11 +313,10 @@ class CarbonSqlParser() extends AbstractSparkSQLParser {
    * @param node
    * @return LogicalPlan
    */
-  protected def nodeToPlan(node: Node): LogicalPlan = {
+  protected def nodeToPlan(node: Node, sql: String): LogicalPlan = {
     node match {
       // if create table taken is found then only we will handle.
       case Token("TOK_CREATETABLE", children) =>
-
 
         var fields: Seq[Field] = Seq[Field]()
         var tableComment: String = ""
@@ -329,6 +327,7 @@ class CarbonSqlParser() extends AbstractSparkSQLParser {
         var ifNotExistPresent: Boolean = false
         var dbName: Option[String] = None
         var tableName: String = ""
+        var isCreateAsSelect: Boolean = false
 
         try {
 
@@ -419,25 +418,36 @@ class CarbonSqlParser() extends AbstractSparkSQLParser {
             case Token("TOK_LIKETABLE", child :: Nil) =>
               likeTableName = child.getChild(0).getText()
 
+            case Token("TOK_QUERY", _) =>
+              isCreateAsSelect = true
+
             case _ => // Unsupport features
           }
 
+          if (isCreateAsSelect) {
+            CreateCarbonTableAsSelect(
+              dbName,
+              tableName,
+              ifNotExistPresent,
+              sql)
+          } else {
+            // validate tblProperties
+            if (!CommonUtil.validateTblProperties(tableProperties, fields)) {
+              throw new MalformedCarbonCommandException("Invalid table properties")
+            }
+            // prepare table model of the collected tokens
+            val tableModel: tableModel = prepareTableModel(ifNotExistPresent,
+              dbName,
+              tableName,
+              fields,
+              partitionCols,
+              tableProperties)
 
-          // validate tblProperties
-          if (!CommonUtil.validateTblProperties(tableProperties, fields)) {
-            throw new MalformedCarbonCommandException("Invalid table properties")
+            // get logical plan.
+            CreateTable(tableModel)
           }
-          // prepare table model of the collected tokens
-          val tableModel: tableModel = prepareTableModel(ifNotExistPresent,
-            dbName,
-            tableName,
-            fields,
-            partitionCols,
-            tableProperties)
-
-          // get logical plan.
-          CreateTable(tableModel)
-        } catch {
+        }
+        catch {
           case ce: MalformedCarbonCommandException =>
             val message = if (tableName.isEmpty) {
               "Create table command failed. "

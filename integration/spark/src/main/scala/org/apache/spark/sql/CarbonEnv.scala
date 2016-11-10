@@ -20,6 +20,7 @@ package org.apache.spark.sql
 import org.apache.spark.SparkContext
 import org.apache.spark.scheduler.cluster.CoarseGrainedSchedulerBackend
 import org.apache.spark.sql.hive.{CarbonMetastoreCatalog, HiveContext}
+import org.apache.spark.sql.optimizer.CarbonAggTableOptimizer
 
 import org.apache.carbondata.common.logging.LogServiceFactory
 
@@ -37,6 +38,7 @@ object CarbonEnv {
       carbonEnv =
         CarbonEnv(sqlContext.asInstanceOf[CarbonContext],
           sqlContext.asInstanceOf[CarbonContext].catalog)
+      CarbonAggTableOptimizer.init(sqlContext)
     }
     carbonEnv
   }
