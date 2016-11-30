@@ -104,7 +104,7 @@ class CarbonSource extends CreatableRelationProvider
                                      dataSchema: StructType): String = {
     val (dbName, tableName) = parameters.get("path") match {
       case Some(path) =>
-        val p = path.split(File.separator)
+        val p = path.split("/")
         ("default", p(p.length - 1))
       case _ => throw new Exception("do not have dbname and tablename for carbon table")
     }
