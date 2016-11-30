@@ -24,7 +24,7 @@ import org.apache.spark.util.TableLoader
 object CarbonExample {
 
   def main(args: Array[String]): Unit = {
-    val rootPath = "/Users/jackylk/code/incubator-carbondata"
+    val rootPath = "E:/carbondata"
     val spark = SparkSession
         .builder()
         .master("local")
@@ -32,24 +32,31 @@ object CarbonExample {
         .enableHiveSupport()
         .config(CarbonCommonConstants.STORE_LOCATION,
           s"$rootPath/examples/spark2/target/store")
+        .config("spark.sql.warehouse.dir", "file:///E:/carbondata/examples/spark2/spark-warehouse")
         .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
 
+//    val spark = SparkSession.builder.config(sc.getConf).enableHiveSupport().getOrCreate()
     // Drop table
     spark.sql("DROP TABLE IF EXISTS carbon_table")
     spark.sql("DROP TABLE IF EXISTS csv_table")
 
     // Create table
+//    spark.sql(
+//      s"""
+//         | CREATE TABLE carbon_table(
+//         |    shortField short,
+//         |    intField int,
+//         |    bigintField long,
+//         |    doubleField double,
+//         |    stringField string
+//         | )
+//         | USING org.apache.spark.sql.CarbonSource
+//       """.stripMargin)
     spark.sql(
       s"""
-         | CREATE TABLE carbon_table(
-         |    shortField short,
-         |    intField int,
-         |    bigintField long,
-         |    doubleField double,
-         |    stringField string
-         | )
-         | USING org.apache.spark.sql.CarbonSource
+         CREATE TABLE carbonTable_agg USING org.apache.spark.sql.CarbonSource
+         as select * from
        """.stripMargin)
 
     val prop = s"$rootPath/conf/dataload.properties.template"
@@ -89,11 +96,12 @@ object CarbonExample {
 //           GROUP BY country
 //           """).show()
 
-    spark.sql("""
-           SELECT sum(intField), stringField
-           FROM carbon_table
-           GROUP BY stringField
-           """).show
+//    spark.sql("""
+//           SELECT sum(intField), stringField
+//           FROM carbon_table
+//           GROUP BY stringField
+//           """).show
+    spark.sql(""" select * from carbon_table""").show()
 
     // Drop table
     spark.sql("DROP TABLE IF EXISTS carbon_table")

@@ -53,6 +53,7 @@ class CarbonSource extends CreatableRelationProvider
     require(!parameters.contains("path"), "'path' should not be specified, " +
         "the path to store carbon file is the 'storePath' specified when creating CarbonContext")
 
+
     val options = new CarbonOption(parameters)
     val storePath = sqlContext.sparkSession.conf.get(CarbonCommonConstants.STORE_LOCATION)
     val tablePath = new Path(storePath + "/" + options.dbName + "/" + options.tableName)
@@ -104,7 +105,7 @@ class CarbonSource extends CreatableRelationProvider
                                      dataSchema: StructType): String = {
     val (dbName, tableName) = parameters.get("path") match {
       case Some(path) =>
-        val p = path.split(File.separator)
+        val p = path.split("/")
         ("default", p(p.length - 1))
       case _ => throw new Exception("do not have dbname and tablename for carbon table")
     }
