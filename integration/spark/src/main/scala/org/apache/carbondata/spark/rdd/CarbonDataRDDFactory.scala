@@ -33,7 +33,7 @@ import org.apache.spark.{SparkContext, SparkEnv, SparkException}
 import org.apache.spark.rdd.{DataLoadCoalescedRDD, DataLoadPartitionCoalescer}
 import org.apache.spark.sql.{CarbonEnv, DataFrame, Row, SQLContext}
 import org.apache.spark.sql.execution.command.{AlterTableModel, CompactionCallableModel, CompactionModel, Partitioner}
-import org.apache.spark.sql.hive.DistributionUtil
+import org.apache.spark.sql.hive.{CarbonMetaData, DistributionUtil}
 import org.apache.spark.util.{FileUtils, SplitUtils}
 
 import org.apache.carbondata.common.logging.LogServiceFactory
@@ -436,12 +436,51 @@ object CarbonDataRDDFactory {
       sqlContext,
       compactionModel.compactionType
     )
+    // need to compact agg table
+    val aggTableList = carbonLoadModel.getCarbonDataLoadSchema
+      .getCarbonTable.getAggregateTablesName
+    if (!aggTableList.isEmpty) {
+      aggTableList.asScala.foreach { aggName=>
+        val aggTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+          .getCarbonTable(carbonLoadModel.getDatabaseName +
+          CarbonCommonConstants.UNDERSCORE + aggName)
+        val aggLoadModel = makeAggCarbonLoadModel(carbonLoadModel, aggName)
+        val aggcompactionCallableModel = CompactionCallableModel(storePath,
+        aggLoadModel, storeLocation, aggTable,kettleHomePath,
+          compactionModel.tableCreationTime,  loadsToMerge,
+          sqlContext, compactionModel.compactionType)
+        val future: Future[Void] = executor
+          .submit(new CompactionCallable(aggcompactionCallableModel))
+        futureList.add(future)
+      }
+    }
 
     val future: Future[Void] = executor
       .submit(new CompactionCallable(compactionCallableModel
       )
       )
     futureList.add(future)
+  }
+
+  def makeAggCarbonLoadModel(carbonLoadModel: CarbonLoadModel,
+                              aggName: String): CarbonLoadModel = {
+    val aggcarbonLoadModel = new CarbonLoadModel
+    aggcarbonLoadModel.setDatabaseName(carbonLoadModel.getDatabaseName)
+    aggcarbonLoadModel.setTableName(aggName)
+    val aggTable = org.apache.carbondata.core.carbon.metadata.CarbonMetadata.getInstance()
+      .getCarbonTable(aggcarbonLoadModel.getDatabaseName +
+      CarbonCommonConstants.UNDERSCORE + aggcarbonLoadModel.getTableName)
+    val carbonLaodSchema = new CarbonDataLoadSchema(aggTable)
+    aggcarbonLoadModel.setCarbonDataLoadSchema(carbonLaodSchema)
+    aggcarbonLoadModel.setStorePath(carbonLoadModel.getStorePath)
+    // Check if any load need to be deleted before loading new data
+    CarbonDataRDDFactory.deleteLoadsAndUpdateMetadata(aggcarbonLoadModel,
+      aggTable, aggTable.getStorePath, isForceDeletion = false)
+    if (null == carbonLoadModel.getLoadMetadataDetails) {
+      CarbonDataRDDFactory.readLoadMetadataDetails(aggcarbonLoadModel, aggTable.getStorePath)
+    }
+    aggcarbonLoadModel.setFactTimeStamp(carbonLoadModel.getFactTimeStamp)
+    aggcarbonLoadModel
   }
 
   def startCompactionThreads(sqlContext: SQLContext,
