@@ -50,8 +50,8 @@ class CarbonSource extends CreatableRelationProvider
     CarbonEnv.init(sqlContext)
     // User should not specify path since only one store is supported in carbon currently,
     // after we support multi-store, we can remove this limitation
-    require(!parameters.contains("path"), "'path' should not be specified, " +
-        "the path to store carbon file is the 'storePath' specified when creating CarbonContext")
+//    require(!parameters.contains("path"), "'path' should not be specified, " +
+//        "the path to store carbon file is the 'storePath' specified when creating CarbonContext")
 
     val options = new CarbonOption(parameters)
     val storePath = sqlContext.sparkSession.conf.get(CarbonCommonConstants.STORE_LOCATION)
@@ -104,7 +104,7 @@ class CarbonSource extends CreatableRelationProvider
                                      dataSchema: StructType): String = {
     val (dbName, tableName) = parameters.get("path") match {
       case Some(path) =>
-        val p = path.split(File.separator)
+        val p = path.split("/")
         ("default", p(p.length - 1))
       case _ => throw new Exception("do not have dbname and tablename for carbon table")
     }
@@ -131,7 +131,7 @@ class CarbonSource extends CreatableRelationProvider
           }
           f
         }
-        val map = scala.collection.mutable.Map[String, String]();
+        val map = scala.collection.mutable.Map[String, String]()
         parameters.foreach { x => map.put(x._1, x._2) }
         val cm = TableCreator.prepareTableModel(false, Option(dbName), tableName, fields, Nil, map)
         CreateTable(cm).run(sparkSession)
