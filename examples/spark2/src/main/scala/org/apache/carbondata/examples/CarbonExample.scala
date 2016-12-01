@@ -60,7 +60,7 @@ object CarbonExample {
       s"ZQDH String, BXWDH String, BGDDM String, BHTXH String, BRZRQ String, " +
       s"BPCBZ String, SXWDH String, SGDDM String, SHTXH String, SRZRQ String, SPCBZ String, CJGS int, " +
       s"CJJG double, CJSJ int, YWLB String, MMLB String, FBBZ String, FILLER String) " +
-      s"USING org.apache.spark.sql.CarbonSource")
+      s"USING org.apache.spark.sql.CarbonSource Options('DICTIONARY_INCLUDE'='CJSJ')")
 //    spark.sql(s"create table dwcjk_agg USING org.apache.spark.sql.CarbonSource" +
 //      s" as select cjrq, cjsj, zqdh, bhtxh as ybdm, bxwdh as jydy, bgddm as gddm, mmlb, " +
 //      s"sum(cjgs) as cjgs, sum(cjgs*cjjg) as cjje " +
@@ -73,6 +73,8 @@ object CarbonExample {
     val dwcjk = s"$rootPath/examples/spark2/src/main/resources/dwcjk.csv"
     TableLoader.main(Array[String](prop, tableName, dwcjk))
 
+
+//    spark.sql("desc formatted dwcjk").show()
     //    spark.sql(
     //      s"""
     //         | CREATE TABLE csv_table
